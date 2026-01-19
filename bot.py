@@ -1,13 +1,19 @@
-
+import os
+from dotenv import load_dotenv
 from keep_alive import keep_alive
+
+# Load the secret .env file
+load_dotenv()
+
+# Start the web server
 keep_alive()
+
 import discord
 from discord.ext import commands
 
-# This permissions setup lets the bot read messages
+# Bot Setup
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
@@ -18,5 +24,6 @@ async def on_ready():
 async def ping(ctx):
     await ctx.send('Pong!')
 
-# REPLACE THE TEXT BELOW WITH YOUR ACTUAL TOKEN
-bot.run('MTQ2MjkwMzM2ODY1Njg4Mzk0OQ.GJ2syI.9iMjzLiMlTvGlbwmgk8KmeNcEJNd-YYVYooSRQ')
+# SECURE LOGIN (Reads from the .env file)
+token = os.getenv('DISCORD_TOKEN')
+bot.run(token)
