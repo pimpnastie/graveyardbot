@@ -20,4 +20,4 @@ class Admin(commands.Cog):
         await ctx.send("⚠️ War nudge sent (logic ready).")
 
 async def setup(bot):
-    await bot.add_cog(Admin(bot))\n
+    await bot.add_cog(Admin(bot))
