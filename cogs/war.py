@@ -56,4 +56,21 @@ class War(commands.Cog):
             data = response.json()
             state = data.get("state", "Unknown")
             clan_name = data.get("clan", {}).get("name", "Unknown")
-            fame = data.get("clan", {}).get("f
+            fame = data.get("clan", {}).get("fame", 0)
+            
+            # Calculate active players
+            participants = data.get("clan", {}).get("participants", [])
+            active = sum(1 for p in participants if p['decksUsed'] > 0)
+            
+            msg = (
+                f"⚔️ **{clan_name}**\n"
+                f"**State:** {state}\n"
+                f"**Fame:** {fame}\n"
+                f"**Active:** {active}/{len(participants)}"
+            )
+            await ctx.send(msg)
+        else:
+            await ctx.send("❌ Could not fetch war data.")
+
+async def setup(bot):
+    await bot.add_cog(War(bot))
