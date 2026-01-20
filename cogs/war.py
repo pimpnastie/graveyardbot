@@ -1,62 +1,59 @@
-import discord
+import os, requests
 from discord.ext import commands
-from discord import app_commands
-from bot import cr_get, get_player_id
-
+from pymongo import MongoClient
 
 class War(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Connect to DB directly
+        self.mongo = MongoClient(os.getenv("MONGO_URL"))
+        self.db = self.mongo["ClashBotDB"]
+        self.users = self.db["users"]
+        self.api_token = os.getenv("CR_TOKEN")
+        self.api_base = "https://api.clashroyale.com/v1"
 
-    async def _send(self, send, user_id: int):
-        pid = get_player_id(user_id)
-        if not pid:
-            await send("❌ Link your account first using `!link #TAG`.")
-            return
+    def get_headers(self):
+        return {
+            "Authorization": f"Bearer {self.api_token}",
+            "Accept": "application/json"
+        }
 
-        player = await cr_get(f"/players/%23{pid}")
-        if not player or "clan" not in player:
-            await send("❌ Could not determine your clan.")
-            return
-
-        clan_tag = player["clan"]["tag"].replace("#", "")
-        data = await cr_get(f"/clans/%23{clan_tag}/currentriverrace")
-
-        if not data or "clan" not in data:
-            await send("❌ Failed to fetch River Race data.")
-            return
-
-        clan = data["clan"]
-        participants = clan.get("participants", [])
-        active = sum(1 for p in participants if p.get("decksUsed", 0) > 0)
-
-        embed = discord.Embed(
-            title=f"⚔️ {clan.get('name', 'Unknown Clan')} – River Race",
-            color=discord.Color.gold()
-        )
-        embed.add_field(name="State", value=data.get("state", "Unknown"), inline=False)
-        embed.add_field(name="Rank", value=clan.get("rank", "?"), inline=True)
-        embed.add_field(name="Fame", value=clan.get("fame", 0), inline=True)
-        embed.add_field(
-            name="Active Participants",
-            value=f"{active}/{len(participants)}",
-            inline=False
-        )
-
-        await send(embed=embed)
-
-    # PREFIX COMMAND
     @commands.command()
-    @commands.cooldown(1, 10, commands.BucketType.user)
-    async def war(self, ctx: commands.Context):
-        await self._send(ctx.send, ctx.author.id)
+    async def war(self, ctx, tag: str = None):
+        """Check River Race status."""
+        target_tag = tag
 
-    # SLASH COMMAND
-    @app_commands.command(name="war", description="Show River Race status")
-    async def war_slash(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        await self._send(interaction.followup.send, interaction.user.id)
+        # If no tag provided, look up the linked user
+        if not target_tag:
+            # FIX: Look for STRING ID to match link.py
+            user_data = self.users.find_one({"_id": str(ctx.author.id)})
+            
+            if not user_data:
+                await ctx.send("❌ Link your account first using `!link #TAG`.")
+                return
+            
+            # Fetch player profile to find their clan
+            player_tag = user_data["player_id"].replace("#", "%23")
+            url = f"{self.api_base}/players/{player_tag}"
+            
+            resp = requests.get(url, headers=self.get_headers())
+            if resp.status_code != 200:
+                await ctx.send("❌ Could not fetch your profile. API Error.")
+                return
+                
+            p_data = resp.json()
+            if "clan" not in p_data:
+                await ctx.send("❌ You are not in a clan!")
+                return
+            target_tag = p_data["clan"]["tag"]
 
-
-async def setup(bot):
-    await bot.add_cog(War(bot))
+        # Fetch War Data
+        safe_tag = target_tag.replace("#", "%23")
+        url = f"{self.api_base}/clans/{safe_tag}/currentriverrace"
+        response = requests.get(url, headers=self.get_headers())
+        
+        if response.status_code == 200:
+            data = response.json()
+            state = data.get("state", "Unknown")
+            clan_name = data.get("clan", {}).get("name", "Unknown")
+            fame = data.get("clan", {}).get("f
