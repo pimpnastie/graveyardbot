@@ -15,7 +15,7 @@ CR_TOKEN = os.getenv("CR_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
-CR_API_BASE = "https://api.clashroyale.com/v1"
+CR_API_BASE = "https://proxy.royaleapi.dev/v1"
 
 # --- DATABASE SETUP ---
 mongo = MongoClient(MONGO_URL)
