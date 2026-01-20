@@ -10,7 +10,7 @@ class War(commands.Cog):
         self.db = self.mongo["ClashBotDB"]
         self.users = self.db["users"]
         self.api_token = os.getenv("CR_TOKEN")
-        self.api_base = "https://api.clashroyale.com/v1"
+        self.api_base = "https://proxy.royaleapi.dev/v1"
 
     def get_headers(self):
         return {
