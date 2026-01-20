@@ -14,4 +14,4 @@ class Reminders(commands.Cog):
                 await channel.send("⚔️ Reminder: Use your war attacks!")
 
 async def setup(bot):
-    await bot.add_cog(Reminders(bot))\n
+    await bot.add_cog(Reminders(bot))
