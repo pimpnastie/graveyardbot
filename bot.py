@@ -10,7 +10,6 @@ log = logging.getLogger("clashbot")
 
 # --- CONFIGURATION ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-# Fixed: Matches the 'CR_TOKEN' key in your Render Screenshot
 CR_TOKEN = os.getenv("CR_TOKEN") 
 MONGO_URL = os.getenv("MONGO_URL")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -22,8 +21,6 @@ mongo = MongoClient(MONGO_URL)
 db = mongo["ClashBotDB"]
 users = db["users"]
 guilds = db["guilds"]
-
-# DELETED: users.create_index("_id", unique=True) <-- Caused the crash. MongoDB handles this automatically!
 
 # Redis is optional
 redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
@@ -49,9 +46,16 @@ class ClashBot(commands.AutoShardedBot):
         
         await self.tree.sync()
 
+    # FIX: This function is now properly indented inside the class!
     async def close(self):
-        await self.http_session.close()
-        mongo.close()
+        # Only close the session if it actually exists
+        if hasattr(self, 'http_session') and self.http_session:
+            await self.http_session.close()
+        
+        # Close Mongo if it exists
+        if 'mongo' in globals() and mongo:
+            mongo.close()
+            
         await super().close()
 
 bot = ClashBot(command_prefix="!", intents=intents)
@@ -72,6 +76,7 @@ async def cr_get(endpoint: str):
 
     url = f"{CR_API_BASE}{endpoint}"
     
+    # We access the bot's session here. This works because 'bot' is global.
     async with bot.http_session.get(url) as resp:
         if resp.status == 200:
             data = await resp.json()
