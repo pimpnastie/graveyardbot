@@ -15,4 +15,4 @@ class Link(commands.Cog):
         await ctx.send(f"✅ Linked to #{normalize(tag)}")
 
 async def setup(bot):
-    await bot.add_cog(Link(bot))\n
+    await bot.add_cog(Link(bot))
