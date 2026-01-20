@@ -73,4 +73,4 @@ def get_player_id(discord_id: int):
 def normalize(tag):
     return tag.replace("#", "").upper()
 
-bot.run(DISCORD_TOKEN)\n
+bot.run(DISCORD_TOKEN)
