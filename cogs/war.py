@@ -24,11 +24,11 @@ class War(commands.Cog):
                 await ctx.send("❌ Link your account first using `!link #TAG`.")
                 return
             
-            # We have a player tag, now we need their CLAN tag
-            player_tag = user_data["player_id"].replace("#", "%23")
-            url = f"{self.api_base}/players/{player_tag}"
+            # FIX: Force the %23 prefix for the API
+            # We strip any existing '#' just in case, then add '%23'
+            clean_player_tag = user_data["player_id"].replace("#", "")
+            url = f"{self.api_base}/players/%23{clean_player_tag}"
             
-            # FIX: Use the bot's existing async session instead of 'requests'
             async with self.bot.http_session.get(url) as resp:
                 if resp.status != 200:
                     await ctx.send(f"❌ API Error: {resp.status} (Player Lookup)")
@@ -41,10 +41,10 @@ class War(commands.Cog):
             target_tag = p_data["clan"]["tag"]
 
         # 2. Fetch War Data
-        safe_tag = target_tag.replace("#", "%23")
-        url = f"{self.api_base}/clans/{safe_tag}/currentriverrace"
+        # FIX: Same force prefix here for the clan tag
+        clean_clan_tag = target_tag.replace("#", "")
+        url = f"{self.api_base}/clans/%23{clean_clan_tag}/currentriverrace"
         
-        # FIX: Async request here too
         async with self.bot.http_session.get(url) as resp:
             if resp.status != 200:
                 await ctx.send(f"❌ API Error: {resp.status} (War Data)")
