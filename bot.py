@@ -115,7 +115,23 @@ bot = ClashBot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} | shards={bot.shard_count}")
+@bot.command()
+async def player(ctx, tag: str = None):
+    if not tag:
+        # If they didn't provide a tag, try to find their linked tag
+        player_id = get_player_id(ctx.author.id)
+        if not player_id:
+            await ctx.send("Please provide a tag or link your account first!")
+            return
+        tag = player_id
 
+    # Use your helper function to fetch data
+    data = await cr_get(f"/players/%23{normalize(tag)}")
+    
+    if data:
+        await ctx.send(f"Found player: {data.get('name')} (Level {data.get('expLevel')})")
+    else:
+        await ctx.send("Could not find that player.")
 # --- HELPER TO FETCH API DATA ---
 async def cr_get(endpoint: str):
     key = f"cr:{endpoint}"
