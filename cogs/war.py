@@ -10,9 +10,9 @@ class War(commands.Cog):
         self.db = self.mongo["ClashBotDB"]
         self.users = self.db["users"]
         self.api_base = "https://proxy.royaleapi.dev/v1"
-    @commands.command()
+   @commands.command()
     async def race(self, ctx):
-        """Detailed River Race stats with player names."""
+        """Detailed River Race stats (Current or Last War)."""
         # 1. Resolve User's Clan Tag
         user_data = self.users.find_one({"_id": str(ctx.author.id)})
         if not user_data:
@@ -21,6 +21,7 @@ class War(commands.Cog):
 
         clean_player_tag = user_data["player_id"].replace("#", "")
         url = f"{self.api_base}/players/%23{clean_player_tag}"
+        
         async with self.bot.http_session.get(url) as resp:
             if resp.status != 200:
                 await ctx.send("❌ API Error (Player Lookup)")
@@ -31,20 +32,48 @@ class War(commands.Cog):
                 return
             clan_tag = p_data["clan"]["tag"]
 
-        # 2. Fetch War Data
+        # 2. Fetch War Data (Try Current First)
         clean_clan_tag = clan_tag.replace("#", "")
-        url = f"{self.api_base}/clans/%23{clean_clan_tag}/currentriverrace"
-        async with self.bot.http_session.get(url) as resp:
-            if resp.status != 200:
-                await ctx.send("❌ API Error (War Data)")
-                return
-            data = await resp.json()
+        current_url = f"{self.api_base}/clans/%23{clean_clan_tag}/currentriverrace"
+        
+        participants = []
+        clan_name = "Unknown"
+        header_text = "War Report"
+
+        async with self.bot.http_session.get(current_url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                state = data.get("state")
+                
+                # If War is ACTIVE, use this data
+                if state == "active":
+                    clan_name = data.get("clan", {}).get("name", "Unknown")
+                    participants = data.get("clan", {}).get("participants", [])
+                else:
+                    # War is NOT active (Training/Matchmaking) -> Fetch LOG
+                    log_url = f"{self.api_base}/clans/%23{clean_clan_tag}/riverracelog?limit=1"
+                    async with self.bot.http_session.get(log_url) as log_resp:
+                        if log_resp.status == 200:
+                            log_data = await log_resp.json()
+                            if log_data.get("items"):
+                                last_war = log_data["items"][0]
+                                header_text = f"Last War Report (Season {last_war.get('seasonId')})"
+                                
+                                # Find our clan in the standings list
+                                for standing in last_war.get("standings", []):
+                                    c = standing.get("clan", {})
+                                    if c.get("tag") == clan_tag:
+                                        clan_name = c.get("name")
+                                        participants = c.get("participants", [])
+                                        break
+                                
+                                await ctx.send(f"⚠️ **No active war.** Showing results from last race.")
+
+        if not participants:
+            await ctx.send("❌ No war data found (Clan might be inactive).")
+            return
 
         # 3. Sort Participants into Lists
-        clan_name = data.get("clan", {}).get("name", "Unknown")
-        participants = data.get("clan", {}).get("participants", [])
-        
-        # Create lists to hold names for each deck count
         deck_lists = {0: [], 1: [], 2: [], 3: [], 4: []}
         
         for p in participants:
@@ -56,9 +85,8 @@ class War(commands.Cog):
         sorted_p = sorted(participants, key=lambda x: x['fame'], reverse=True)[:5]
 
         # 4. Build the Message
-        msg = f"📊 **{clan_name} War Report**\n\n"
+        msg = f"📊 **{clan_name} {header_text}**\n\n"
         
-        # Helper function to format the list of names
         def format_list(label, names, emoji):
             if not names: return ""
             return f"{emoji} **{label} ({len(names)}):**\n`{', '.join(names)}`\n\n"
@@ -72,9 +100,8 @@ class War(commands.Cog):
         for i, p in enumerate(sorted_p, 1):
             msg += f"`{i}.` **{p['name']}**: {p['fame']}\n"
 
-        # Check for message length limits
         if len(msg) > 2000:
-            msg = msg[:1900] + "\n...(message truncated due to length)"
+            msg = msg[:1900] + "\n...(message truncated)"
             
         await ctx.send(msg)
 
