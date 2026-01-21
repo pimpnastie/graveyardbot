@@ -10,9 +10,9 @@ class War(commands.Cog):
         self.db = self.mongo["ClashBotDB"]
         self.users = self.db["users"]
         self.api_base = "https://proxy.royaleapi.dev/v1"
-   @commands.command()
-    async def race(self, ctx):
-        """Detailed River Race stats (Current or Last War)."""
+    @commands.command()
+    async def race(self, ctx, option: str = None):
+        """Detailed River Race stats. Usage: !race or !race last"""
         # 1. Resolve User's Clan Tag
         user_data = self.users.find_one({"_id": str(ctx.author.id)})
         if not user_data:
@@ -32,42 +32,53 @@ class War(commands.Cog):
                 return
             clan_tag = p_data["clan"]["tag"]
 
-        # 2. Fetch War Data (Try Current First)
+        # 2. Fetch War Data
         clean_clan_tag = clan_tag.replace("#", "")
         current_url = f"{self.api_base}/clans/%23{clean_clan_tag}/currentriverrace"
         
         participants = []
         clan_name = "Unknown"
         header_text = "War Report"
+        
+        # Decide whether to fetch Current or Last war
+        fetch_last_war = False
+        
+        if option and option.lower() == "last":
+            fetch_last_war = True
+        else:
+            # Check if current war is active
+            async with self.bot.http_session.get(current_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    state = data.get("state")
+                    if state == "active":
+                        clan_name = data.get("clan", {}).get("name", "Unknown")
+                        participants = data.get("clan", {}).get("participants", [])
+                    else:
+                        fetch_last_war = True # Auto-fallback if not active
 
-        async with self.bot.http_session.get(current_url) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                state = data.get("state")
-                
-                # If War is ACTIVE, use this data
-                if state == "active":
-                    clan_name = data.get("clan", {}).get("name", "Unknown")
-                    participants = data.get("clan", {}).get("participants", [])
-                else:
-                    # War is NOT active (Training/Matchmaking) -> Fetch LOG
-                    log_url = f"{self.api_base}/clans/%23{clean_clan_tag}/riverracelog?limit=1"
-                    async with self.bot.http_session.get(log_url) as log_resp:
-                        if log_resp.status == 200:
-                            log_data = await log_resp.json()
-                            if log_data.get("items"):
-                                last_war = log_data["items"][0]
-                                header_text = f"Last War Report (Season {last_war.get('seasonId')})"
-                                
-                                # Find our clan in the standings list
-                                for standing in last_war.get("standings", []):
-                                    c = standing.get("clan", {})
-                                    if c.get("tag") == clan_tag:
-                                        clan_name = c.get("name")
-                                        participants = c.get("participants", [])
-                                        break
-                                
-                                await ctx.send(f"⚠️ **No active war.** Showing results from last race.")
+        # If we need to fetch the last war (either forced or fallback)
+        if fetch_last_war:
+            log_url = f"{self.api_base}/clans/%23{clean_clan_tag}/riverracelog?limit=1"
+            async with self.bot.http_session.get(log_url) as log_resp:
+                if log_resp.status == 200:
+                    log_data = await log_resp.json()
+                    if log_data.get("items"):
+                        last_war = log_data["items"][0]
+                        header_text = f"Last War Report (Season {last_war.get('seasonId')})"
+                        
+                        # Find our clan in the standings list
+                        for standing in last_war.get("standings", []):
+                            c = standing.get("clan", {})
+                            if c.get("tag") == clan_tag:
+                                clan_name = c.get("name")
+                                participants = c.get("participants", [])
+                                break
+                        
+                        if option and option.lower() == "last":
+                            await ctx.send(f"📅 **Showing Previous War Results** (Requested via `!race last`)")
+                        else:
+                            await ctx.send(f"⚠️ **No active war.** Showing results from last race.")
 
         if not participants:
             await ctx.send("❌ No war data found (Clan might be inactive).")
@@ -104,7 +115,6 @@ class War(commands.Cog):
             msg = msg[:1900] + "\n...(message truncated)"
             
         await ctx.send(msg)
-
     @commands.command()
     async def war(self, ctx, tag: str = None):
         """Check River Race status."""
