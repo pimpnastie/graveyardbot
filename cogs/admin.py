@@ -1,4 +1,5 @@
-import os, requests
+import os, requests, json, csv, io
+from datetime import datetime
 from discord.ext import commands
 from pymongo import MongoClient
 
@@ -9,6 +10,8 @@ class Admin(commands.Cog):
         self.mongo = MongoClient(os.getenv("MONGO_URL"))
         self.db = self.mongo["ClashBotDB"]
         self.users = self.db["users"]
+        self.history = self.db["clan_history"]  # <--- NEW: Connects to history collection
+
         self.api_token = os.getenv("CR_TOKEN")
         self.api_base = "https://proxy.royaleapi.dev/v1"
 
@@ -23,16 +26,17 @@ class Admin(commands.Cog):
         user_data = self.users.find_one({"_id": str(discord_id)})
         if not user_data:
             return False
-        
+
         # 2. Fetch player profile to check role
         player_tag = user_data["player_id"].replace("#", "%23")
         url = f"{self.api_base}/players/{player_tag}"
         resp = requests.get(url, headers=self.get_headers())
-        
+
         if resp.status_code == 200:
             data = resp.json()
             # Check if role is leader or coLeader
             return data.get("role") in ("leader", "coLeader")
+        
         return False
 
     @commands.command()
@@ -54,6 +58,7 @@ class Admin(commands.Cog):
         # Fetch profile to get clan tag
         p_url = f"{self.api_base}/players/{player_tag}"
         p_resp = requests.get(p_url, headers=self.get_headers())
+        
         if p_resp.status_code != 200 or "clan" not in p_resp.json():
             await ctx.send("❌ Could not find your clan.")
             return
@@ -71,8 +76,8 @@ class Admin(commands.Cog):
         # 4. Find Slackers
         data = w_resp.json()
         participants = data.get("clan", {}).get("participants", [])
+        
         slacking = []
-
         for p in participants:
             decks = p['decksUsed']
             if decks < 4:
@@ -87,6 +92,61 @@ class Admin(commands.Cog):
             await ctx.send(msg)
         else:
             await ctx.send("🎉 **Perfect!** Everyone has used all 4 decks!")
+
+    @commands.command()
+    async def import_history(self, ctx):
+        """Import RoyaleAPI history data. Attach a JSON or CSV file."""
+        # 1. Permission Check
+        if not await self.is_leader(ctx.author.id):
+            await ctx.send("❌ **Access Denied:** You must be a Leader or Co-Leader.")
+            return
+
+        # 2. Check for File Attachment
+        if not ctx.message.attachments:
+            await ctx.send("❌ Please attach a **JSON** or **CSV** file with the history data.")
+            return
+
+        attachment = ctx.message.attachments[0]
+        filename = attachment.filename.lower()
+        
+        # 3. Download and Parse
+        try:
+            file_bytes = await attachment.read()
+            records = []
+
+            if filename.endswith(".json"):
+                data = json.loads(file_bytes)
+                # Handle if file is a list or a dict with "items"
+                if isinstance(data, list):
+                    records = data
+                elif isinstance(data, dict) and "items" in data:
+                    records = data["items"]
+                elif isinstance(data, dict):
+                    records = [data]
+            
+            elif filename.endswith(".csv"):
+                # Decode bytes to string for CSV reader
+                text_data = file_bytes.decode("utf-8")
+                reader = csv.DictReader(io.StringIO(text_data))
+                records = list(reader)
+            
+            else:
+                await ctx.send("❌ File must be .json or .csv")
+                return
+
+            # 4. Save to MongoDB
+            if records:
+                # Add a timestamp to know when it was imported
+                for r in records:
+                    r["imported_at"] = datetime.utcnow()
+                
+                self.history.insert_many(records)
+                await ctx.send(f"✅ Successfully imported **{len(records)}** history records!")
+            else:
+                await ctx.send("⚠️ The file appeared to be empty or invalid format.")
+
+        except Exception as e:
+            await ctx.send(f"❌ Error processing file: `{e}`")
 
 async def setup(bot):
     await bot.add_cog(Admin(bot))
