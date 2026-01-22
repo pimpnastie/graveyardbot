@@ -21,13 +21,16 @@ class Admin(commands.Cog):
         if not user_data:
             return False
 
-        player_tag = user_data["player_id"].replace("#", "%23")
-        url = f"{self.api_base}/players/{player_tag}"
+        # FIX: Force the %23 prefix so the API accepts the tag
+        clean_tag = user_data["player_id"].replace("#", "")
+        url = f"{self.api_base}/players/%23{clean_tag}"
         
         async with self.bot.http_session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.json()
+                # Check for leader OR coLeader (API uses camelCase)
                 return data.get("role") in ("leader", "coLeader")
+        
         return False
 
     @commands.command()
