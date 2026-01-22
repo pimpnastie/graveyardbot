@@ -28,7 +28,6 @@ class Admin(commands.Cog):
         async with self.bot.http_session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                # Check for leader OR coLeader (API uses camelCase)
                 return data.get("role") in ("leader", "coLeader")
         
         return False
@@ -49,18 +48,21 @@ class Admin(commands.Cog):
             await ctx.send("❌ Link your account first.")
             return
         
-        # Get Leader's Clan Tag
-        player_tag = user_data["player_id"].replace("#", "%23")
-        async with self.bot.http_session.get(f"{self.api_base}/players/{player_tag}") as resp:
+        # FIX: Use the same correct tag logic here
+        player_tag = user_data["player_id"].replace("#", "")
+        url = f"{self.api_base}/players/%23{player_tag}"
+        
+        async with self.bot.http_session.get(url) as resp:
             p_data = await resp.json()
             if "clan" not in p_data:
                 await ctx.send("❌ You are not in a clan.")
                 return
-            clan_tag = p_data["clan"]["tag"].replace("#", "%23")
+            # Fix clan tag as well just in case
+            clan_tag = p_data["clan"]["tag"].replace("#", "")
         
         # 2. Parallel Fetch: Clan Roster + Current War
-        c_url = f"{self.api_base}/clans/{clan_tag}"
-        w_url = f"{self.api_base}/clans/{clan_tag}/currentriverrace"
+        c_url = f"{self.api_base}/clans/%23{clan_tag}"
+        w_url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
         
         async with self.bot.http_session.get(c_url) as c_resp, \
                    self.bot.http_session.get(w_url) as w_resp:
@@ -158,13 +160,21 @@ class Admin(commands.Cog):
             return
 
         user_data = self.users.find_one({"_id": str(ctx.author.id)})
-        player_tag = user_data["player_id"].replace("#", "%23")
         
-        async with self.bot.http_session.get(f"{self.api_base}/players/{player_tag}") as resp:
+        # FIX: Use the same correct tag logic here
+        player_tag = user_data["player_id"].replace("#", "")
+        url = f"{self.api_base}/players/%23{player_tag}"
+        
+        async with self.bot.http_session.get(url) as resp:
             p_data = await resp.json()
-            clan_tag = p_data["clan"]["tag"].replace("#", "%23")
+            if "clan" not in p_data:
+                await ctx.send("❌ You are not in a clan.")
+                return
+            clan_tag = p_data["clan"]["tag"].replace("#", "")
 
-        async with self.bot.http_session.get(f"{self.api_base}/clans/{clan_tag}/currentriverrace") as resp:
+        # Use correct clan URL with %23
+        w_url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
+        async with self.bot.http_session.get(w_url) as resp:
             data = await resp.json()
 
         slacking = []
