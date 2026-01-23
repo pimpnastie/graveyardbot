@@ -9,7 +9,7 @@ class Admin(commands.Cog):
         self.bot = bot
         # ✅ USE SHARED DB (Fixes Issue #1)
         self.db = bot.db 
-        self.users = bot.users
+        self.users = bot.db_users
         self.history = self.db["clan_history"]
         self.redis = bot.redis # ✅ USE SHARED REDIS (Fixes Issue #2)
 
