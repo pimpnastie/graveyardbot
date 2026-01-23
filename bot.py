@@ -112,34 +112,37 @@ class ClashBot(commands.AutoShardedBot):
             mongo.close()
         await super().close()
 
-bot = ClashBot(command_prefix="!", intents=intents)
-
-@bot.event
-async def on_ready():
-    log.info(f"Logged in as {bot.user} | shards={bot.shard_count}")
-
 # --- EXECUTION BLOCK ---
 if __name__ == "__main__":
     
-    # 1. Start the web server immediately
     print("🌍 Starting web dashboard...")
     start_keep_alive()
     
-    print("🚀 Attempting to start bot...")
-    
-    # 2. Run the bot with the anti-ban loop
+    # LOOP TO HANDLE CRASHES/RESTARTS
     while True:
+        print("🚀 Creating new bot instance and attempting to start...")
+        
+        # 1. Create a FRESH bot instance every time we loop
+        # This is the key fix: It prevents the "Session is closed" error
+        bot = ClashBot(command_prefix="!", intents=intents)
+        
+        @bot.event
+        async def on_ready():
+            log.info(f"Logged in as {bot.user} | shards={bot.shard_count}")
+
         try:
             bot.run(DISCORD_TOKEN)
             
         except discord.errors.HTTPException as e:
             if e.status == 429:
                 print("\n🛑 DISCORD RATE LIMIT DETECTED (429) 🛑")
-                print("The bot is restarting too fast. Sleeping for 3 minutes to let the ban expire.")
-                time.sleep(180)
+                print("Sleeping for 5 minutes to let the ban expire...")
+                time.sleep(300) # Wait 5 minutes to be safe
             else:
                 print(f"❌ An HTTP error occurred: {e}")
-                raise e
+                time.sleep(10) # Small buffer for other HTTP errors
+                
         except Exception as e:
             print(f"❌ A critical error occurred: {e}")
-            raise e
+            print("Restarting in 10 seconds...")
+            time.sleep(10)
