@@ -83,4 +83,18 @@ async def on_ready():
     print(f"🌐 Guilds: {len(bot.guilds)}")
 
 # 🚨 IMPORTANT: NO while True, NO restart loop
-bot.run(DISCORD_TOKEN)
+if __name__ == "__main__":
+    import time
+    import sys
+    
+    print("🚀 Starting Bot...")
+    
+    try:
+        # This is the ONLY place bot.run should exist
+        bot.run(DISCORD_TOKEN)
+    except Exception as e:
+        print(f"\n❌ CRITICAL ERROR ON STARTUP: {e}")
+        # This is the fix: Force a wait so Render can't restart us instantly
+        print("💤 Sleeping for 5 minutes before exiting to prevent Cloudflare ban...")
+        time.sleep(300) 
+        sys.exit(1)
