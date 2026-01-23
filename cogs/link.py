@@ -38,7 +38,19 @@ class Link(commands.Cog):
             {"$set": {"player_id": clean_tag}}, 
             upsert=True
         )
-        await ctx.send(f"✅ Linked to **#{clean_tag}**")
+
+        # --- Badge/Role Logic ---
+        role_id = 1464091054960803893  # Your Badge Role ID
+        role = ctx.guild.get_role(role_id)
+
+        if role:
+            try:
+                await ctx.author.add_roles(role)
+                await ctx.send(f"✅ Linked to **#{clean_tag}** and gave you the **{role.name}** badge!")
+            except discord.Forbidden:
+                await ctx.send(f"✅ Linked to **#{clean_tag}**, but I don't have permission to give you the role. (Check bot hierarchy)")
+        else:
+            await ctx.send(f"✅ Linked to **#{clean_tag}**, but I couldn't find the badge role to give you.")
 
     @commands.command(aliases=["profile"])
     async def stats(self, ctx, tag: str = None):
