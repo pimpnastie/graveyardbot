@@ -1,4 +1,4 @@
-import os, logging, discord, aiohttp, redis, threading
+import os, logging, discord, aiohttp, redis, threading, json, sys, time
 from flask import Flask, render_template_string
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -6,6 +6,7 @@ from pymongo import MongoClient
 
 load_dotenv()
 
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("clashbot")
 
@@ -94,7 +95,8 @@ class ClashBot(commands.AutoShardedBot):
             "Authorization": f"Bearer {CR_TOKEN}",
             "Accept": "application/json"
         })
-        for cog in ("link", "war", "admin", "reminders"):
+        # Load cogs
+        for cog in ("link",): # Add other cogs here if you have them like "war", "admin"
             try:
                 await self.load_extension(f"cogs.{cog}")
                 log.info(f"Loaded extension: {cog}")
@@ -115,53 +117,29 @@ bot = ClashBot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} | shards={bot.shard_count}")
-@bot.command()
-async def player(ctx, tag: str = None):
-    if not tag:
-        # If they didn't provide a tag, try to find their linked tag
-        player_id = get_player_id(ctx.author.id)
-        if not player_id:
-            await ctx.send("Please provide a tag or link your account first!")
-            return
-        tag = player_id
 
-    # Use your helper function to fetch data
-    data = await cr_get(f"/players/%23{normalize(tag)}")
-    
-    if data:
-        await ctx.send(f"Found player: {data.get('name')} (Level {data.get('expLevel')})")
-    else:
-        await ctx.send("Could not find that player.")
-# --- HELPER TO FETCH API DATA ---
-async def cr_get(endpoint: str):
-    key = f"cr:{endpoint}"
-    if redis_client:
-        cached = redis_client.get(key)
-        if cached:
-            import json
-            return json.loads(cached)
-
-    url = f"{CR_API_BASE}{endpoint}"
-    async with bot.http_session.get(url) as resp:
-        if resp.status == 200:
-            data = await resp.json()
-            if redis_client:
-                import json
-                redis_client.setex(key, 300, json.dumps(data))
-            return data
-        else:
-            log.error(f"API Error {resp.status} on {url}")
-            return None
-
-def get_player_id(discord_id: int):
-    doc = users.find_one({"_id": str(discord_id)})
-    return doc["player_id"] if doc else None
-
-def normalize(tag):
-    return tag.replace("#", "").upper()
-
+# --- EXECUTION BLOCK ---
 if __name__ == "__main__":
-    # Start the Flask Web Server
+    
+    # 1. Start the web server immediately
+    print("🌍 Starting web dashboard...")
     start_keep_alive()
-    # Start the Discord Bot
-    bot.run(DISCORD_TOKEN)
+    
+    print("🚀 Attempting to start bot...")
+    
+    # 2. Run the bot with the anti-ban loop
+    while True:
+        try:
+            bot.run(DISCORD_TOKEN)
+            
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                print("\n🛑 DISCORD RATE LIMIT DETECTED (429) 🛑")
+                print("The bot is restarting too fast. Sleeping for 3 minutes to let the ban expire.")
+                time.sleep(180)
+            else:
+                print(f"❌ An HTTP error occurred: {e}")
+                raise e
+        except Exception as e:
+            print(f"❌ A critical error occurred: {e}")
+            raise e
