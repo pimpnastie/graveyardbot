@@ -95,14 +95,27 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} ({bot.user.id})")
     print(f"🌐 Guilds: {len(bot.guilds)}")
 
-# 🚨 CRASH LOOP PROTECTION
+# 🚨 ONE-TRY STARTUP LOGIC
 if __name__ == "__main__":
     import sys
-    print("🚀 Starting Bot...")
+    import time
+    
+    print("🚀 Attempting to start bot (Single Attempt)...")
+    
     try:
+        # This will block here as long as the bot is running.
+        # It only returns or errors if the connection dies completely.
         bot.run(DISCORD_TOKEN)
+        
     except Exception as e:
-        print(f"\n❌ CRITICAL STARTUP ERROR: {e}")
-        print("💤 Sleeping 5 minutes to prevent Cloudflare Ban...")
-        time.sleep(300) 
-        sys.exit(1)
+        # If we get here, the connection failed.
+        print(f"\n❌ CRITICAL ERROR: {e}")
+        print("🛑 STOPPING: The bot failed to connect.")
+        print("💤 Entering 'Coma Mode' to prevent Render restart loop.")
+        print("👉 You must manually REDEPLOY to try again.")
+
+        # Infinite loop that does NOTHING. 
+        # The process stays "alive", so Render doesn't restart it.
+        # But it makes 0 calls to Discord.
+        while True:
+            time.sleep(3600)
