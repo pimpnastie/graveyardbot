@@ -19,6 +19,7 @@ REDIS_URL = os.getenv("REDIS_URL")
 CR_API_BASE = "https://proxy.royaleapi.dev/v1"
 
 # --- DATABASE SETUP ---
+# We create the connection ONCE globally. It stays open forever.
 mongo = MongoClient(MONGO_URL)
 db = mongo["ClashBotDB"]
 users = db["users"]
@@ -28,7 +29,6 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL els
 # --- FLASK WEB DASHBOARD ---
 app = Flask(__name__)
 
-# This HTML template makes the page look nice (Dark Mode!)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -69,17 +69,19 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def home():
-    # Fetch all linked users from MongoDB
-    all_users = list(users.find())
-    return render_template_string(HTML_TEMPLATE, users=all_users)
+    try:
+        # Fetch all linked users from MongoDB
+        all_users = list(users.find())
+        return render_template_string(HTML_TEMPLATE, users=all_users)
+    except Exception as e:
+        log.error(f"Dashboard Error: {e}")
+        return "Database Error", 500
 
 def run_flask():
     port = int(os.getenv("PORT", 8080))
-    # host='0.0.0.0' is required for Render to see the website
     app.run(host='0.0.0.0', port=port)
 
 def start_keep_alive():
-    # Run Flask in a separate thread so it doesn't block the bot
     t = threading.Thread(target=run_flask)
     t.daemon = True
     t.start()
@@ -95,8 +97,7 @@ class ClashBot(commands.AutoShardedBot):
             "Authorization": f"Bearer {CR_TOKEN}",
             "Accept": "application/json"
         })
-        # Load cogs
-        for cog in ("link",): # Add other cogs here if you have them like "war", "admin"
+        for cog in ("link",): 
             try:
                 await self.load_extension(f"cogs.{cog}")
                 log.info(f"Loaded extension: {cog}")
@@ -106,10 +107,11 @@ class ClashBot(commands.AutoShardedBot):
         await self.tree.sync()
 
     async def close(self):
+        # Only close the http_session.
+        # CRITICAL FIX: We removed 'mongo.close()' so the DB stays alive!
         if hasattr(self, 'http_session') and self.http_session:
             await self.http_session.close()
-        if 'mongo' in globals() and mongo:
-            mongo.close()
+        
         await super().close()
 
 # --- EXECUTION BLOCK ---
@@ -122,8 +124,6 @@ if __name__ == "__main__":
     while True:
         print("🚀 Creating new bot instance and attempting to start...")
         
-        # 1. Create a FRESH bot instance every time we loop
-        # This is the key fix: It prevents the "Session is closed" error
         bot = ClashBot(command_prefix="!", intents=intents)
         
         @bot.event
@@ -136,11 +136,11 @@ if __name__ == "__main__":
         except discord.errors.HTTPException as e:
             if e.status == 429:
                 print("\n🛑 DISCORD RATE LIMIT DETECTED (429) 🛑")
-                print("Sleeping for 5 minutes to let the ban expire...")
-                time.sleep(300) # Wait 5 minutes to be safe
+                print("The bot is restarting too fast. Sleeping for 5 minutes...")
+                time.sleep(300) 
             else:
                 print(f"❌ An HTTP error occurred: {e}")
-                time.sleep(10) # Small buffer for other HTTP errors
+                time.sleep(10)
                 
         except Exception as e:
             print(f"❌ A critical error occurred: {e}")
