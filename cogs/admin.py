@@ -7,11 +7,11 @@ from discord.ext import commands
 class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # ✅ USE SHARED DB (Fixes Issue #1)
+        # ✅ USE SHARED DB
         self.db = bot.db 
         self.users = bot.db_users
         self.history = self.db["clan_history"]
-        self.redis = bot.redis # ✅ USE SHARED REDIS (Fixes Issue #2)
+        self.redis = bot.redis 
 
         self.api_base = "https://proxy.royaleapi.dev/v1"
 
@@ -47,8 +47,6 @@ class Admin(commands.Cog):
 
     async def is_leader(self, discord_id):
         """Checks if the user is a Leader/Co-Leader."""
-        # Optimization: We could cache this too, but for safety (permissions), 
-        # we often prefer live data. Kept live for security.
         user_data = self.users.find_one({"_id": str(discord_id)})
         if not user_data: return False
 
@@ -94,7 +92,7 @@ class Admin(commands.Cog):
                             level = card.get('level', 1) + (13 - card.get('maxLevel', 13)) + 1
                             hits.append(f"**{member['name']}**: Lvl {level}")
                             break
-            await asyncio.sleep(0.2) # Increased sleep to be safer
+            await asyncio.sleep(0.2)
 
         if hits:
             msg = f"🃏 **Found {card_name} Owners:**\n" + "\n".join(hits)
@@ -193,7 +191,6 @@ class Admin(commands.Cog):
             return await ctx.send("⚠️ Missing roles: Member, Elder, Co-Leader, or Leader.")
 
         changes = 0
-        # Iterate linked users
         for user_doc in self.users.find():
             discord_id = int(user_doc["_id"])
             
@@ -235,14 +232,72 @@ class Admin(commands.Cog):
             output.seek(0)
             return await ctx.send("📊 Report:", file=discord.File(fp=output, filename="Audit.csv"))
 
-        # Chat Report
         issues = []
         for m in clan.get("memberList", []):
             if war_part.get(m['tag'], 0) < 4:
                 issues.append(f"**{m['name']}**: {war_part.get(m['tag'], 0)}/4 War Decks")
 
-        msg = "⚠️ **Audit (Low War):**\n" + "\n".join(issues[:20]) # Limit to 20 lines
+        msg = "⚠️ **Audit (Low War):**\n" + "\n".join(issues[:20]) 
         await ctx.send(msg if issues else "✅ Clan looks good!")
+
+    @commands.command()
+    async def primetime(self, ctx):
+        """Shows the hour (UTC) when the clan is most active."""
+        clan_tag = await self.get_clan_tag(ctx)
+        if not clan_tag:
+            return await ctx.send("❌ Link your account first.")
+
+        c_url = f"{self.api_base}/clans/%23{clan_tag}"
+        async with self.bot.http_session.get(c_url) as resp:
+            if resp.status != 200:
+                return await ctx.send("❌ Could not fetch clan data.")
+            data = await resp.json()
+
+        hours = []
+        for member in data.get("memberList", []):
+            if "lastSeen" in member:
+                try:
+                    ls = member['lastSeen']
+                    hour_str = ls.split('T')[1][:2] 
+                    hours.append(int(hour_str))
+                except:
+                    pass
+        
+        if not hours:
+            return await ctx.send("❌ No activity data available.")
+
+        peak_hour, count = Counter(hours).most_common(1)[0]
+        note = "Morning" if 5 <= peak_hour < 12 else "Afternoon" if 12 <= peak_hour < 17 else "Evening" if 17 <= peak_hour < 22 else "Night"
+        
+        await ctx.send(f"🕒 **Prime Time:** The clan is most active around **{peak_hour}:00 UTC** ({note}).\n📊 Based on {len(hours)} active members.")
+
+    @commands.command()
+    async def clan(self, ctx):
+        """Shows general clan stats."""
+        clan_tag = await self.get_clan_tag(ctx)
+        if not clan_tag:
+            return await ctx.send("❌ Link your account first.")
+
+        c_url = f"{self.api_base}/clans/%23{clan_tag}"
+        async with self.bot.http_session.get(c_url) as resp:
+            if resp.status != 200:
+                return await ctx.send("❌ Could not fetch clan data.")
+            data = await resp.json()
+
+        embed = discord.Embed(title=f"{data.get('name')} (#{data.get('tag').replace('#','')})", color=0xF1C40F)
+        embed.description = data.get("description", "No description.")
+        
+        embed.add_field(name="🏆 Clan Score", value=data.get("clanScore", 0), inline=True)
+        embed.add_field(name="⚔️ War Trophies", value=data.get("clanWarTrophies", 0), inline=True)
+        embed.add_field(name="👥 Members", value=f"{data.get('members', 0)}/50", inline=True)
+        
+        loc = data.get("location", {}).get("name", "Unknown")
+        embed.add_field(name="🌍 Location", value=loc, inline=True)
+        
+        req = data.get("requiredTrophies", 0)
+        embed.add_field(name="🚪 Required", value=f"{req}+ Trophies", inline=True)
+        
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Admin(bot))
