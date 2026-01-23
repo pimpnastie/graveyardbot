@@ -6,7 +6,7 @@ class War(commands.Cog):
         self.bot = bot
         # ✅ USE SHARED RESOURCES
         self.db = bot.db
-        self.users = bot.users
+        self.users = bot.db_users
         self.redis = bot.redis
         self.api_base = "https://proxy.royaleapi.dev/v1"
 
