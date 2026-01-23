@@ -1,63 +1,54 @@
-import os
 import discord
 from discord.ext import commands
-from pymongo import MongoClient
 
 class Link(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.api_base = "https://proxy.royaleapi.dev/v1"
-        
-        # Connect to DB
-        self.mongo = MongoClient(os.getenv("MONGO_URL"))
-        self.db = self.mongo["ClashBotDB"]
-        self.users = self.db["users"]
+        self.users = bot.users
 
-    # --- HELPER: Resolve Tag ---
     async def resolve_tag(self, ctx, tag):
-        """Helper to get a clean tag from args or database."""
         if tag:
             return tag.upper().replace("#", "")
-        
         user_data = self.users.find_one({"_id": str(ctx.author.id)})
-        if user_data:
-            return user_data["player_id"].replace("#", "")
-        
-        return None
-
-    # --- COMMANDS ---
+        return user_data["player_id"] if user_data else None
 
     @commands.command()
+    @commands.guild_only()
     async def link(self, ctx, tag: str):
-        """Link your Discord to a Player ID."""
         clean_tag = tag.upper().replace("#", "")
-        
-        # Save as String
+
         self.users.update_one(
-            {"_id": str(ctx.author.id)}, 
-            {"$set": {"player_id": clean_tag}}, 
+            {"_id": str(ctx.author.id)},
+            {"$set": {"player_id": clean_tag}},
             upsert=True
         )
 
-        # --- Badge/Role Logic ---
-        role_id = 1464091054960803893  # Your Badge Role ID
-        role = ctx.guild.get_role(role_id)
+        guild = ctx.guild
+        member = guild.get_member(ctx.author.id)
 
-        if role:
-            try:
-                await ctx.author.add_roles(role)
-                await ctx.send(f"✅ Linked to **#{clean_tag}** and gave you the **{role.name}** badge!")
-            except discord.Forbidden:
-                await ctx.send(f"✅ Linked to **#{clean_tag}**, but I don't have permission to give you the role. (Check bot hierarchy)")
-        else:
-            await ctx.send(f"✅ Linked to **#{clean_tag}**, but I couldn't find the badge role to give you.")
+        role_id = 1464091054960803893
+        role = guild.get_role(role_id)
+
+        if not role:
+            await ctx.send(f"✅ Linked to **#{clean_tag}**, but role not found.")
+            return
+
+        if role.position >= guild.me.top_role.position:
+            await ctx.send("❌ I can't assign that role due to role hierarchy.")
+            return
+
+        try:
+            await member.add_roles(role, reason="Account linked")
+            await ctx.send(f"✅ Linked to **#{clean_tag}** and gave you **{role.name}**!")
+        except discord.Forbidden:
+            await ctx.send("✅ Linked, but I lack permission to manage roles.")
 
     @commands.command(aliases=["profile"])
     async def stats(self, ctx, tag: str = None):
-        """View comprehensive player stats."""
         clean_tag = await self.resolve_tag(ctx, tag)
         if not clean_tag:
-            await ctx.send("❌ Link your account or provide a tag: `!stats #TAG`")
+            await ctx.send("❌ Link your account or provide a tag.")
             return
 
         url = f"{self.api_base}/players/%23{clean_tag}"
@@ -67,27 +58,17 @@ class Link(commands.Cog):
                 return
             data = await resp.json()
 
-        # Parse Data
-        name = data.get("name")
-        lvl = data.get("expLevel")
-        trophies = data.get("trophies")
-        best_trophies = data.get("bestTrophies")
-        wins = data.get("wins")
-        losses = data.get("losses")
-        clan = data.get("clan", {}).get("name", "No Clan")
-        arena = data.get("arena", {}).get("name", "Unknown Arena")
-
-        embed = discord.Embed(title=f"{name} (Lvl {lvl})", color=0x3498db)
-        embed.add_field(name="🏆 Trophies", value=f"{trophies} (Best: {best_trophies})", inline=True)
-        embed.add_field(name="🛡️ Clan", value=clan, inline=True)
-        embed.add_field(name="⚔️ W/L Ratio", value=f"{wins}/{losses}", inline=True)
-        embed.add_field(name="🏟️ Arena", value=arena, inline=False)
-        
+        embed = discord.Embed(
+            title=f"{data.get('name')} (Lvl {data.get('expLevel')})",
+            color=0x3498db
+        )
+        embed.add_field(name="🏆 Trophies", value=data.get("trophies"), inline=True)
+        embed.add_field(name="🛡️ Clan", value=data.get("clan", {}).get("name", "None"), inline=True)
+        embed.add_field(name="⚔️ W/L", value=f"{data.get('wins')}/{data.get('losses')}", inline=True)
         await ctx.send(embed=embed)
 
     @commands.command()
     async def chests(self, ctx, tag: str = None):
-        """Check upcoming chest cycle."""
         clean_tag = await self.resolve_tag(ctx, tag)
         if not clean_tag:
             await ctx.send("❌ Link your account or provide a tag.")
@@ -101,26 +82,13 @@ class Link(commands.Cog):
             data = await resp.json()
 
         items = data.get("items", [])
-        
         msg = "**Upcoming Chests:**\n"
-        # Next 3 chests
         for chest in items[:3]:
             msg += f"`+{chest['index'] + 1}` **{chest['name']}**\n"
-            
-        msg += "\n**Rare Chests:**\n"
-        rares = ["Magical Chest", "Giant Chest", "Royal Wild Chest", "Mega Lightning Chest", "Legendary Chest"]
-        found_rares = []
-        
-        for chest in items:
-            if chest['name'] in rares:
-                found_rares.append(f"{chest['name']} `+{chest['index'] + 1}`")
-        
-        msg += "\n".join(found_rares) if found_rares else "No rare chests nearby."
         await ctx.send(msg)
 
     @commands.command(aliases=["battles", "history"])
     async def log(self, ctx, tag: str = None):
-        """View last 5 battle results."""
         clean_tag = await self.resolve_tag(ctx, tag)
         if not clean_tag:
             await ctx.send("❌ Link your account or provide a tag.")
@@ -134,82 +102,40 @@ class Link(commands.Cog):
             data = await resp.json()
 
         msg = f"📜 **Last 5 Battles for #{clean_tag}**\n\n"
-        
         for battle in data[:5]:
-            # Determine Win/Loss
-            # Team crowns vs Opponent crowns is usually the easiest check
-            team_crowns = battle['team'][0]['crowns']
-            opp_crowns = battle['opponent'][0]['crowns']
-            
-            if team_crowns > opp_crowns:
-                result = "✅ Win"
-            elif team_crowns < opp_crowns:
-                result = "❌ Loss"
-            else:
-                result = "🤝 Draw"
-                
-            opponent_name = battle['opponent'][0]['name']
-            msg += f"{result} vs **{opponent_name}** ({team_crowns}-{opp_crowns})\n"
-            
+            team = battle['team'][0]['crowns']
+            opp = battle['opponent'][0]['crowns']
+            result = "✅ Win" if team > opp else "❌ Loss" if team < opp else "🤝 Draw"
+            msg += f"{result}\n"
         await ctx.send(msg)
 
     @commands.command()
     async def clan(self, ctx, tag: str = None):
-        """View detailed clan info."""
-        # 1. If tag provided, use it. If not, get user's clan.
-        clean_tag = None
-        
-        if tag:
-             clean_tag = tag.upper().replace("#", "")
-        else:
-             # Look up user to get their clan tag
-             user_tag = await self.resolve_tag(ctx, None)
-             if not user_tag:
-                 await ctx.send("❌ Link your account first.")
-                 return
-                 
-             # Fetch player profile to find clan
-             p_url = f"{self.api_base}/players/%23{user_tag}"
-             async with self.bot.http_session.get(p_url) as resp:
-                 if resp.status == 200:
-                     p_data = await resp.json()
-                     if "clan" in p_data:
-                         clean_tag = p_data["clan"]["tag"].replace("#", "")
-                     else:
-                         await ctx.send("❌ You are not in a clan.")
-                         return
-                 else:
-                     await ctx.send("❌ API Error fetching profile.")
-                     return
+        clean_tag = await self.resolve_tag(ctx, tag)
+        if not clean_tag:
+            await ctx.send("❌ Link your account first.")
+            return
 
-        # 2. Fetch Clan Data
-        c_url = f"{self.api_base}/clans/%23{clean_tag}"
-        async with self.bot.http_session.get(c_url) as resp:
+        url = f"{self.api_base}/clans/%23{clean_tag}"
+        async with self.bot.http_session.get(url) as resp:
             if resp.status != 200:
-                await ctx.send("❌ Could not fetch clan data.")
+                await ctx.send("❌ Could not fetch clan.")
                 return
             data = await resp.json()
 
-        embed = discord.Embed(title=f"{data.get('name')} (#{data.get('tag').replace('#','')})", color=0xf1c40f)
+        embed = discord.Embed(title=data.get("name"), color=0xf1c40f)
         embed.description = data.get("description", "No description.")
-        embed.add_field(name="🏆 Clan Score", value=data.get("clanScore"), inline=True)
-        embed.add_field(name="👥 Members", value=f"{data.get('members')}/50", inline=True)
-        embed.add_field(name="🌍 Location", value=data.get("location", {}).get("name", "Unknown"), inline=True)
-        embed.add_field(name="🃏 Donations/Wk", value=data.get("donationsPerWeek"), inline=True)
-        
         await ctx.send(embed=embed)
 
     @commands.command()
     @commands.is_owner()
     async def cleanup(self, ctx):
-        """Deletes entries where the ID is stored as a Number."""
         count = 0
         for user in self.users.find():
-            user_id = user["_id"]
-            if isinstance(user_id, int):
-                self.users.delete_one({"_id": user_id})
+            if isinstance(user["_id"], int):
+                self.users.delete_one({"_id": user["_id"]})
                 count += 1
-        await ctx.send(f"🧹 Cleaned up **{count}** duplicate integer entries.")
+        await ctx.send(f"🧹 Cleaned {count} entries.")
 
 async def setup(bot):
     await bot.add_cog(Link(bot))
