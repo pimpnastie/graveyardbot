@@ -21,7 +21,14 @@ mongo = MongoClient(MONGO_URL)
 db = mongo["ClashBotDB"]
 users = db["users"]
 
-redis_client = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
+# Initialize Redis (SAFE MODE: handles if Redis URL is missing)
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        log.info("✅ Redis Connected")
+    except Exception as e:
+        log.error(f"❌ Redis Connection Failed: {e}")
 
 # --- FLASK DASHBOARD ---
 app = Flask(__name__)
@@ -32,9 +39,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <h1>🏆 Graveyard Bot Dashboard</h1>
 <table border="1">
-<tr><th>Discord ID</th><th>Player Tag</th></tr>
+<tr><th>Discord ID</th><th>Player Tag</th><th>Roles</th></tr>
 {% for user in users %}
-<tr><td>{{ user['_id'] }}</td><td>#{{ user['player_id'] }}</td></tr>
+<tr>
+    <td>{{ user['_id'] }}</td>
+    <td>#{{ user.get('player_id', '???') }}</td>
+    <td>{{ user.get('roles', []) }}</td>
+</tr>
 {% endfor %}
 </table>
 </body>
@@ -46,14 +57,15 @@ def home():
     return render_template_string(HTML_TEMPLATE, users=list(users.find()))
 
 def run_flask():
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_flask, daemon=True).start()
 
 # --- DISCORD BOT ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True # REQUIRED for role syncing
 
 class ClashBot(commands.AutoShardedBot):
     async def setup_hook(self):
@@ -62,10 +74,11 @@ class ClashBot(commands.AutoShardedBot):
             "Accept": "application/json"
         })
 
-        # Share DB with cogs
+        # --- SHARE RESOURCES WITH COGS ---
         self.mongo = mongo
         self.db = db
         self.users = users
+        self.redis = redis_client # <--- NEW: Cog access to Redis
 
         await self.load_extension("cogs.link")
         await self.tree.sync()
@@ -82,19 +95,14 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} ({bot.user.id})")
     print(f"🌐 Guilds: {len(bot.guilds)}")
 
-# 🚨 IMPORTANT: NO while True, NO restart loop
+# 🚨 CRASH LOOP PROTECTION
 if __name__ == "__main__":
-    import time
     import sys
-    
     print("🚀 Starting Bot...")
-    
     try:
-        # This is the ONLY place bot.run should exist
         bot.run(DISCORD_TOKEN)
     except Exception as e:
-        print(f"\n❌ CRITICAL ERROR ON STARTUP: {e}")
-        # This is the fix: Force a wait so Render can't restart us instantly
-        print("💤 Sleeping for 5 minutes before exiting to prevent Cloudflare ban...")
+        print(f"\n❌ CRITICAL STARTUP ERROR: {e}")
+        print("💤 Sleeping 5 minutes to prevent Cloudflare Ban...")
         time.sleep(300) 
         sys.exit(1)
