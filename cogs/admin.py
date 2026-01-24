@@ -89,7 +89,7 @@ class Admin(commands.Cog):
                     p_data = await p_resp.json()
                     for card in p_data.get("cards", []):
                         if card['name'].lower() == card_name.lower():
-                            level = card.get('level', 1) + (13 - card.get('maxLevel', 13)) + 1
+                            level = card.get('level', 1) + (16 - card.get('maxLevel', 16)) + 1
                             hits.append(f"**{member['name']}**: Lvl {level}")
                             break
             await asyncio.sleep(0.2)
