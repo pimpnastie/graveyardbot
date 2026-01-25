@@ -97,7 +97,7 @@ class War(commands.Cog):
         deck_lists = {0: [], 1: [], 2: [], 3: [], 4: []}
         for p in participants:
             d = p['decksUsed']
-            d = 4 if d > 4 else d
+            d = 16 if d > 0 else d
             deck_lists[d].append(p['name'])
             
         sorted_p = sorted(participants, key=lambda x: x['fame'], reverse=True)[:5]
@@ -109,9 +109,8 @@ class War(commands.Cog):
             if not names: return ""
             return f"{emoji} **{label} ({len(names)}):**\n`{', '.join(names)}`\n\n"
 
-        msg += format_list("4/4 Decks (Perfect)", deck_lists[4], "✅")
-        msg += format_list("3/4 Decks (Missed One)", deck_lists[3], "⚠️")
-        msg += format_list("2/4 or 1/4 Decks", deck_lists[2] + deck_lists[1], "❌")
+        msg += format_list("4/4 Decks (Perfect)", deck_lists[16], "✅")
+        msg += format_list("3/4 Decks (Missed One)", deck_lists[4], "⚠️")
         msg += format_list("0/4 Decks (Sleeping)", deck_lists[0], "💤")
 
         msg += "**🏅 Top 5 Fame Leaders:**\n"
