@@ -68,8 +68,13 @@ HTML_TEMPLATE = """
 
 @app.route("/")
 def home():
-    # Pass the actual collection data to the template
-    return render_template_string(HTML_TEMPLATE, users=list(users_collection.find()))
+    try:
+        users = list(users_collection.find())
+    except Exception:
+        log.exception("Dashboard: failed to read users_collection")
+        return "<h1>Service temporarily unavailable</h1><p>Database connection error.</p>", 503
+    return render_template_string(HTML_TEMPLATE, users=users)
+
 
 def run_flask():
     # Render tends to use port 10000; default to 10000 when no PORT provided
@@ -188,14 +193,8 @@ class ClashBot(commands.AutoShardedBot):
             except Exception:
                 log.exception("Error closing http_session")
 
-        try:
-            if hasattr(self, "mongo") and self.mongo:
-                try:
-                    self.mongo.close()
-                except Exception:
-                    log.exception("Error closing Mongo client")
-        except Exception:
-            log.exception("Error during mongo close check")
+        # Skip closing the global MongoClient here to avoid interfering with the Flask dashboard.
+        log.debug("Skipping mongo.close() to avoid closing client while dashboard is running")
 
         await super().close()
 
