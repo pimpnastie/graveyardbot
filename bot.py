@@ -6,6 +6,8 @@ import redis
 import threading
 import time
 import traceback
+import asyncio
+import copy
 from flask import Flask, render_template_string
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -29,7 +31,7 @@ if not DISCORD_TOKEN:
 # --- DATABASE ---
 mongo = MongoClient(MONGO_URL)
 db = mongo["ClashBotDB"]
-users_collection = db["users"] # Renamed local variable for clarity
+users_collection = db["users"]  # Renamed local variable for clarity
 
 # --- REDIS (OPTIONAL) ---
 redis_client = None
@@ -70,8 +72,8 @@ def home():
     return render_template_string(HTML_TEMPLATE, users=list(users_collection.find()))
 
 def run_flask():
-    # Windows Socket Error Fix: Use port 5000 if 8080/10000 fails
-    port = int(os.getenv("PORT", 5000))
+    # Render tends to use port 10000; default to 10000 when no PORT provided
+    port = int(os.getenv("PORT", 10000))
     try:
         app.run(host="0.0.0.0", port=port)
     except OSError:
@@ -87,17 +89,23 @@ intents.members = True
 
 class ClashBot(commands.AutoShardedBot):
     async def setup_hook(self):
-        self.http_session = aiohttp.ClientSession(headers={
-            "Authorization": f"Bearer {CR_TOKEN}",
-            "Accept": "application/json"
-        })
+        headers = {"Accept": "application/json"}
+        if CR_TOKEN:
+            headers["Authorization"] = f"Bearer {CR_TOKEN}"
+        self.http_session = aiohttp.ClientSession(headers=headers)
 
-        # Share DB + Redis with cogs
+        # Shared resources
         self.mongo = mongo
         self.db = db
-        # ✅ FIX: Renamed from self.users to self.db_users
-        self.db_users = users_collection 
+        self.db_users = users_collection
         self.redis = redis_client
+
+        # API helpers: in-memory cache and concurrency limiter
+        self.api_cache = {}  # url -> (expiry_ts, data)
+        self.api_semaphore = asyncio.Semaphore(int(os.getenv("API_CONCURRENCY", "6")))
+
+        # Ensure indexes and basic DB setup run at startup (non-blocking)
+        await self._ensure_db_indexes()
 
         # --- 🛠️ LOAD ALL EXTENSIONS ---
         extensions = [
@@ -116,9 +124,79 @@ class ClashBot(commands.AutoShardedBot):
 
         await self.tree.sync()
 
+    async def _ensure_db_indexes(self):
+        loop = asyncio.get_running_loop()
+        def blocking_create_indexes():
+            try:
+                db.clan_history.create_index(
+                    [("clan_tag", 1), ("timestamp", -1)],
+                    name="clan_ts_idx",
+                    background=True
+                )
+                db.player_history.create_index(
+                    [("player_tag", 1), ("timestamp", -1)],
+                    name="player_ts_idx",
+                    background=True
+                )
+                db.player_history.create_index(
+                    [("discord_id", 1), ("timestamp", -1)],
+                    name="discord_ts_idx",
+                    background=True,
+                    sparse=True
+                )
+                ttl_days = os.getenv("CLAN_HISTORY_TTL_DAYS")
+                if ttl_days:
+                    try:
+                        seconds = int(ttl_days) * 24 * 3600
+                        db.clan_history.create_index("timestamp", expireAfterSeconds=seconds, name="clan_history_ttl", background=True)
+                    except Exception:
+                        log.exception("Failed to create TTL index for clan_history")
+
+                log.info("✅ DB indexes ensured")
+            except Exception:
+                log.exception("Failed to ensure DB indexes")
+
+        await loop.run_in_executor(None, blocking_create_indexes)
+
+    async def fetch_api(self, url, ttl=300):
+        """Simple in-memory TTL cache and concurrency-limited fetch helper.
+        Returns parsed JSON or None on failure."""
+        now = time.time()
+        cached = self.api_cache.get(url)
+        if cached and cached[0] > now:
+            # return a deepcopy so callers don't mutate cache
+            return copy.deepcopy(cached[1])
+
+        async with self.api_semaphore:
+            try:
+                async with self.http_session.get(url) as resp:
+                    if resp.status != 200:
+                        log.debug("API %s returned status %s", url, resp.status)
+                        return None
+                    data = await resp.json()
+                    # store a deepcopy to avoid accidental mutation later
+                    self.api_cache[url] = (now + ttl, copy.deepcopy(data))
+                    return copy.deepcopy(data)
+            except Exception:
+                log.exception("API fetch failed for %s", url)
+                return None
+
     async def close(self):
         if hasattr(self, "http_session"):
-            await self.http_session.close()
+            try:
+                await self.http_session.close()
+            except Exception:
+                log.exception("Error closing http_session")
+
+        try:
+            if hasattr(self, "mongo") and self.mongo:
+                try:
+                    self.mongo.close()
+                except Exception:
+                    log.exception("Error closing Mongo client")
+        except Exception:
+            log.exception("Error during mongo close check")
+
         await super().close()
 
 bot = ClashBot(command_prefix="!", intents=intents)
@@ -135,6 +213,19 @@ async def on_disconnect():
 @bot.event
 async def on_resumed():
     log.info("🔄 Discord session resumed")
+
+@bot.event
+async def on_command_error(ctx, error):
+    # Friendly handling for common errors
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        try:
+            await ctx.reply("Missing argument for command. See command help.", mention_author=False)
+        except Exception:
+            log.exception("Failed to send MissingRequiredArgument reply")
+        return
+    log.exception("Unhandled command error: %s", error)
 
 # --- SINGLE ATTEMPT START ---
 if __name__ == "__main__":
