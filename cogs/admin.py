@@ -325,7 +325,7 @@ class Admin(commands.Cog):
 
     @commands.hybrid_command(name="audit")
     async def audit(self, ctx, option: str = None):
-        """Audit report. Usage: `!audit` or `/audit` or `!audit csv` — saves a snapshot to DB and optionally returns CSV."""
+        """Audit report. Usage: `!audit` or `!audit csv` — saves a snapshot to DB or prints CSV."""
         if not await self.is_leader(ctx.author.id):
             return await ctx.reply("❌ Access Denied.", mention_author=False)
 
