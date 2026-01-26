@@ -59,17 +59,14 @@ class Admin(commands.Cog):
             pass
 
     def _chunk_message(self, header, lines, limit=1900):
-        """Splits a long list of lines into multiple Discord-safe chunks."""
         chunks = []
         current_chunk = header + "\n"
-        
         for line in lines:
             if len(current_chunk) + len(line) + 1 > limit:
                 chunks.append(current_chunk)
                 current_chunk = line + "\n"
             else:
                 current_chunk += line + "\n"
-        
         if current_chunk:
             chunks.append(current_chunk)
         return chunks
@@ -81,7 +78,6 @@ class Admin(commands.Cog):
             if war_data.get("periodType") == "training":
                 return 0
 
-            # 1) Prefer explicit per-day data
             days_block = war_data.get("days") or war_data.get("dayHistory") or war_data.get("daysStats")
             if isinstance(days_block, list) and len(days_block) > 0:
                 active_days = 0
@@ -94,7 +90,6 @@ class Admin(commands.Cog):
                         pass
                 return min(16, active_days * 4)
 
-            # 2) Fallback heuristic
             participants = war_data.get("clan", {}).get("participants", [])
             total_clan_decks = sum(int(p.get("decksUsed", 0) or 0) for p in participants)
             if total_clan_decks == 0:
@@ -111,7 +106,6 @@ class Admin(commands.Cog):
 
             active_days_by_usage = math.ceil(max_decks_used / 4) if max_decks_used > 0 else 0
             
-            # Calculate elapsed days
             start_str = war_data.get("startTime") or war_data.get("startDate")
             elapsed_days = None
             if start_str:
@@ -153,9 +147,9 @@ class Admin(commands.Cog):
     async def get_clan_tag(self, ctx):
         discord_id = str(ctx.author.id)
         if self.redis:
-            cached_tag = self.redis.get(f"clan_tag:{discord_id}")
-            if cached_tag:
-                return cached_tag.decode('utf-8') if isinstance(cached_tag, bytes) else cached_tag
+            val = self.redis.get(f"clan_tag:{discord_id}")
+            if val:
+                return val.decode('utf-8') if isinstance(val, bytes) else val
         
         user_data = await self._find_user_by_discord(ctx.author.id)
         if not user_data:
@@ -164,7 +158,6 @@ class Admin(commands.Cog):
         url = f"{self.api_base}/players/%23{clean_tag}"
         data = await self.bot.fetch_api(url, ttl=3600)
         if not data:
-            self.log.warning(f"Could not resolve clan tag for user {discord_id}")
             return None
         
         clan_tag = data.get("clan", {}).get("tag", "").replace("#", "")
@@ -200,11 +193,11 @@ class Admin(commands.Cog):
         
         war = await self.bot.fetch_api(w_url, ttl=30)
         if not war:
-             self.log.warning(f"⚠️ Failed to fetch WAR data for {clan_tag} (might be training days or API issue).")
              war = {}
 
         expected_decks = self._compute_expected_decks(war)
-        war_part = {p.get('tag'): p.get('decksUsed', 0) for p in war.get("clan", {}).get("participants", [])}
+        # Create a map of war data by player tag for easy lookup
+        war_participants = {p.get('tag'): p for p in war.get("clan", {}).get("participants", [])}
 
         members_summary = []
         clean_tags = []
@@ -214,50 +207,77 @@ class Admin(commands.Cog):
             clean_tag = tag.lstrip("#")
             clean_tags.append(clean_tag)
             
+            # --- Activity Data ---
             last_seen = m.get('lastSeen')
             last_seen_ts = self._parse_iso(last_seen)
             days_since_seen = None
             if last_seen_ts:
                 days_since_seen = (datetime.utcnow().replace(tzinfo=timezone.utc) - last_seen_ts).days
             
-            war_decks = war_part.get(tag, 0)
+            # --- War Data ---
+            p_data = war_participants.get(tag, {})
+            war_decks = p_data.get('decksUsed', 0)
+            fame = p_data.get('fame', 0)
+            repair_points = p_data.get('repairPoints', 0)
+            
             deck_completion_pct = 0
             if expected_decks and expected_decks > 0:
                 deck_completion_pct = round(min(1.0, war_decks / expected_decks), 4)
 
             members_summary.append({
                 "tag": clean_tag,
-                "tag_with_hash": tag,
-                "name": m.get('name'),
-                "role": m.get('role'),
+                "name": m.get('name', 'Unknown'),
+                "role": m.get('role', 'member'),
+                "exp_level": m.get('expLevel', 0),
+                "trophies": m.get('trophies', 0),
+                "arena": m.get('arena', {}).get('name', 'Unknown'),
+                "clan_rank": m.get('clanRank', 0),
                 "donations": m.get('donations', 0),
+                "donations_received": m.get('donationsReceived', 0),
                 "war_decks": war_decks,
                 "expected_decks": expected_decks,
                 "deck_completion_pct": deck_completion_pct,
+                "fame": fame,
+                "repair_points": repair_points,
                 "last_seen": last_seen,
                 "last_seen_ts": last_seen_ts,
-                "days_since_seen": days_since_seen,
-                "fame": None, 
-                "trophies": m.get('trophies'),
-                "exp_level": m.get('expLevel')
+                "days_since_seen": days_since_seen
             })
 
-        # --- CSV Generation (In-Memory) ---
+        # --- Enhanced CSV Generation ---
         try:
             output = io.StringIO()
             writer = csv.writer(output)
-            writer.writerow(["Tag", "Name", "Role", "Donations", "War Decks", "Expected Decks", "Completion%", "Last Seen"])
+            
+            # THOROUGH HEADERS
+            headers = [
+                "Rank", "Name", "Tag", "Role", "Level", "Trophies", "Arena",
+                "Donations Sent", "Donations Rcvd", 
+                "War Decks Used", "Expected Decks", "Completion %", "Fame", "Repair Points",
+                "Days Inactive", "Last Seen (ISO)"
+            ]
+            writer.writerow(headers)
+            
             for m in members_summary:
                 writer.writerow([
-                    f"#{m.get('tag','')}",
-                    m.get("name", ""),
-                    m.get("role", ""),
-                    m.get("donations", 0),
-                    m.get("war_decks", 0),
-                    m.get("expected_decks", 0),
-                    f"{m.get('deck_completion_pct') or 0:.2f}",
-                    m.get("last_seen") or ""
+                    m.get("clan_rank"),
+                    m.get("name"),
+                    f"#{m.get('tag')}",
+                    m.get("role"),
+                    m.get("exp_level"),
+                    m.get("trophies"),
+                    m.get("arena"),
+                    m.get("donations"),
+                    m.get("donations_received"),
+                    m.get("war_decks"),
+                    m.get("expected_decks"),
+                    f"{m.get('deck_completion_pct')*100:.1f}%",
+                    m.get("fame"),
+                    m.get("repair_points"),
+                    m.get("days_since_seen") if m.get("days_since_seen") is not None else "N/A",
+                    m.get("last_seen") or "Unknown"
                 ])
+                
             output.seek(0)
             csv_bytes = output.getvalue().encode("utf-8")
         except Exception:
@@ -293,7 +313,6 @@ class Admin(commands.Cog):
                 except Exception:
                     self.log.exception("GridFS store failed")
 
-            # Store Snapshot
             def blocking_insert_snapshot(doc):
                 return self.history.insert_one(doc)
             res = await loop.run_in_executor(None, blocking_insert_snapshot, snapshot)
@@ -349,7 +368,6 @@ class Admin(commands.Cog):
                 self.log.info("No users found to audit.")
                 return
 
-            # Pick the first user to seed the clan tag
             first_user = all_users[0] 
             clean_tag = first_user.get("player_id", "").replace("#", "")
             
@@ -363,7 +381,7 @@ class Admin(commands.Cog):
                 clan_tag = p_data["clan"]["tag"].replace("#", "")
                 
                 if clan_tag not in scanned_clans:
-                    # --- DUPLICATE CHECK START ---
+                    # --- DUPLICATE CHECK ---
                     now = datetime.utcnow()
                     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                     
@@ -415,21 +433,20 @@ class Admin(commands.Cog):
         
         if self.redis:
             try:
-                cached_bytes = self.redis.get(cache_key)
-                if cached_bytes:
-                    cached_msg = cached_bytes.decode('utf-8')
-                    # Calculate Age
-                    ts_bytes = self.redis.get(timestamp_key)
-                    if ts_bytes:
-                        saved_ts = float(ts_bytes.decode('utf-8'))
+                val = self.redis.get(cache_key)
+                if val:
+                    cached_msg = val.decode('utf-8') if isinstance(val, bytes) else val
+                    
+                    ts_val = self.redis.get(timestamp_key)
+                    if ts_val:
+                        ts_str = ts_val.decode('utf-8') if isinstance(ts_val, bytes) else ts_val
+                        saved_ts = float(ts_str)
                         mins_ago = int((datetime.utcnow().timestamp() - saved_ts) / 60)
                         data_age_str = f"{mins_ago}m ago"
             except Exception:
                 self.log.exception("Redis read error in audit")
 
         if cached_msg:
-             # If it was chunked/split in a previous run, it might be tricky to store multiple msgs in one key.
-             # For simplicity, we cache the FULL text and re-chunk it here.
              chunks = self._chunk_message(f"📉 **Low Activity Report** (⚡ Cached: {data_age_str})", cached_msg.split("\n"))
              for chunk in chunks:
                  await ctx.send(chunk)
@@ -447,14 +464,11 @@ class Admin(commands.Cog):
             used = m.get("war_decks", 0)
             if expected > 0 and used < expected:
                 diff = expected - used
-                # More detailed format: Role, Name, Used/Expected
                 issues.append(f"⚠️ **{m.get('name')}** ({m.get('role', 'member')}): `{used}/{expected}` (Missed {diff})")
 
         if issues:
-            # Join all issues into one big string first
             full_body = "\n".join(issues)
             
-            # Save to Cache (Raw text body only)
             if self.redis:
                 try:
                     self.redis.setex(cache_key, 600, full_body)
@@ -462,7 +476,6 @@ class Admin(commands.Cog):
                 except Exception:
                     pass
 
-            # Send safely (Chunked)
             header = f"📉 **Low Activity Report** ({len(issues)} members flagged)"
             chunks = self._chunk_message(header, issues)
             for chunk in chunks:
@@ -505,7 +518,6 @@ class Admin(commands.Cog):
         was_deleted = await loop.run_in_executor(None, blocking_cleanup)
         snapshot = await self._run_audit_scan(clan_tag)
 
-        # Clear cache so normal !audit picks up new data
         if self.redis:
             self.redis.delete(f"audit_report:{clan_tag}")
             self.redis.delete(f"audit_ts:{clan_tag}")
@@ -529,16 +541,16 @@ class Admin(commands.Cog):
         if not clan_tag:
             return await ctx.reply("❌ Link your account and join a clan first.", mention_author=False)
 
-        # --- CACHE CHECK ---
         if clan_flag:
             cache_key = f"scout_meta:clan:{clan_tag}"
         else:
             cache_key = f"scout_meta:player:{ctx.author.id}"
 
         if self.redis:
-            cached_msg = self.redis.get(cache_key)
-            if cached_msg:
-                return await ctx.reply(cached_msg.decode('utf-8') + "\n*(⚡ Cached result)*", mention_author=False)
+            val = self.redis.get(cache_key)
+            if val:
+                cached_msg = val.decode('utf-8') if isinstance(val, bytes) else val
+                return await ctx.reply(cached_msg + "\n*(⚡ Cached result)*", mention_author=False)
 
         await self._safe_defer(ctx)
         url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
@@ -563,7 +575,6 @@ class Admin(commands.Cog):
             else:
                 return await ctx.reply("❌ I couldn't resolve your linked player tag. Use `!link <tag>`", mention_author=False)
         else:
-            # Top 5 players by usage
             top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:5]
 
         opponent_cards = []
@@ -575,8 +586,7 @@ class Admin(commands.Cog):
             logs = await self.bot.fetch_api(b_url, ttl=30)
             
             if logs:
-                for battle in logs[:10]: # Check last 10 battles
-                    # Verify it's a river race battle if needed, but for now we take all recent
+                for battle in logs[:10]:
                     opp = battle.get("opponent", [{}])[0]
                     cards = opp.get("cards", [])
                     if cards:
@@ -588,7 +598,7 @@ class Admin(commands.Cog):
                 
             await asyncio.sleep(0.25)
 
-        most_common = Counter(opponent_cards).most_common(8) # Increased to top 8
+        most_common = Counter(opponent_cards).most_common(8)
         if most_common:
             header = f"⚠️ **Meta Report** (Based on {battles_analyzed} battles)\n"
             body = "\n".join([f"🔥 **{c}** ({n})" for c, n in most_common])
@@ -744,13 +754,11 @@ class Admin(commands.Cog):
             if "lastSeen" in member:
                 try:
                     ls = member['lastSeen']
-                    # Use safer string searching than fixed index
                     if 'T' in ls:
                         hour_str = ls.split('T')[1][:2]
                         if hour_str.isdigit():
                             hours.append(int(hour_str))
                 except Exception:
-                     # Log this because parsing errors matter
                      self.log.warning(f"Failed to parse time for {member.get('name')}")
 
         if not hours:
