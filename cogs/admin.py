@@ -221,32 +221,33 @@ class Admin(commands.Cog):
         else:
             await ctx.reply("📉 Not enough data.", mention_author=False)
 
-    @commands.hybrid_command(name="scout")
-    async def scout(self, ctx, *, arg: str = None):
-        clan_flag = bool(arg and arg.lower().strip() == "clan")
-        clan_tag = await self.get_clan_tag(ctx)
-        if not clan_tag:
-            return await ctx.reply("❌ Link your account and join a clan first.", mention_author=False)
+        @commands.hybrid_command(name="scout")
+        async def scout(self, ctx, *, arg: str = None):
+            """Generates a meta report of opponent cards from the current river race."""
+            clan_flag = bool(arg and arg.lower().strip() == "clan")
+            clan_tag = await self.get_clan_tag(ctx)
+            if not clan_tag:
+                return await ctx.reply("❌ Link your account and join a clan first.", mention_author=False)
 
-        await self._safe_defer(ctx)
-        url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
-        data = await self.bot.fetch_api(url, ttl=30)
-        if not data:
-            return await ctx.reply("❌ Failed to fetch race data.", mention_author=False)
+            await self._safe_defer(ctx)
+            url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
+            data = await self.bot.fetch_api(url, ttl=30)
+            if not data:
+                return await ctx.reply("❌ Failed to fetch race data.", mention_author=False)
 
-        participants = data.get("clan", {}).get("participants", [])
-        if not participants:
-            return await ctx.reply("❌ No participants data available.", mention_author=False)
+            participants = data.get("clan", {}).get("participants", [])
+            if not participants:
+                return await ctx.reply("❌ No participants data available.", mention_author=False)
 
-        if not clan_flag:
-            linked = await self._find_user_by_discord(ctx.author.id)
-            if linked and linked.get("player_id"):
-                player_tag = "#" + linked.get("player_id").lstrip("#")
-                target = next((p for p in participants if p.get("tag") == player_tag), None)
-                if target:
-                    top_players = [target]
-                else:
-                    top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:1]
+            if not clan_flag:
+                linked = await self._find_user_by_discord(ctx.author.id)
+                if linked and linked.get("player_id"):
+                    player_tag = "#" + linked.get("player_id").lstrip("#")
+                    target = next((p for p in participants if p.get("tag") == player_tag), None)
+                    if target:
+                        top_players = [target]
+                    else:
+                        top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:1]
             else:
                 return await ctx.reply("❌ I couldn't resolve your linked player tag. Use `!link <tag>`", mention_author=False)
         else:
