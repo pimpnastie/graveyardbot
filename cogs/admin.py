@@ -5,11 +5,10 @@ import asyncio
 import logging
 import gridfs
 import math
-import copy
 from collections import Counter
 from datetime import datetime, timezone
 import discord
-from discord.ext import commands, tasks  # Added tasks
+from discord.ext import commands, tasks
 
 MAX_CARD_LEVEL = int(os.getenv("MAX_CARD_LEVEL", "16"))
 
@@ -25,7 +24,7 @@ class Admin(commands.Cog):
         self.api_base = "https://proxy.royaleapi.dev/v1"
         self.log = logging.getLogger("clashbot")
         
-        # Start the daily loop
+        # Start the daily scheduled task
         self.daily_audit_task.start()
 
     def cog_unload(self):
@@ -58,6 +57,22 @@ class Admin(commands.Cog):
                 await ctx.interaction.response.defer()
         except Exception:
             pass
+
+    def _chunk_message(self, header, lines, limit=1900):
+        """Splits a long list of lines into multiple Discord-safe chunks."""
+        chunks = []
+        current_chunk = header + "\n"
+        
+        for line in lines:
+            if len(current_chunk) + len(line) + 1 > limit:
+                chunks.append(current_chunk)
+                current_chunk = line + "\n"
+            else:
+                current_chunk += line + "\n"
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        return chunks
 
     def _compute_expected_decks(self, war_data):
         try:
@@ -140,7 +155,8 @@ class Admin(commands.Cog):
         if self.redis:
             cached_tag = self.redis.get(f"clan_tag:{discord_id}")
             if cached_tag:
-                return cached_tag
+                return cached_tag.decode('utf-8') if isinstance(cached_tag, bytes) else cached_tag
+        
         user_data = await self._find_user_by_discord(ctx.author.id)
         if not user_data:
             return None
@@ -148,7 +164,9 @@ class Admin(commands.Cog):
         url = f"{self.api_base}/players/%23{clean_tag}"
         data = await self.bot.fetch_api(url, ttl=3600)
         if not data:
+            self.log.warning(f"Could not resolve clan tag for user {discord_id}")
             return None
+        
         clan_tag = data.get("clan", {}).get("tag", "").replace("#", "")
         if clan_tag and self.redis:
             self.redis.setex(f"clan_tag:{discord_id}", 3600, clan_tag)
@@ -170,13 +188,20 @@ class Admin(commands.Cog):
     # --------------------
     async def _run_audit_scan(self, clan_tag):
         """Fetches data, saves to DB, and returns the snapshot dict."""
+        self.log.info(f"🏁 Starting audit scan for clan {clan_tag}...")
+        
         c_url = f"{self.api_base}/clans/%23{clan_tag}"
         w_url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
 
         clan = await self.bot.fetch_api(c_url, ttl=30)
         if not clan:
+            self.log.error(f"❌ Failed to fetch CLAN data for {clan_tag}")
             return None
-        war = await self.bot.fetch_api(w_url, ttl=30) or {}
+        
+        war = await self.bot.fetch_api(w_url, ttl=30)
+        if not war:
+             self.log.warning(f"⚠️ Failed to fetch WAR data for {clan_tag} (might be training days or API issue).")
+             war = {}
 
         expected_decks = self._compute_expected_decks(war)
         war_part = {p.get('tag'): p.get('decksUsed', 0) for p in war.get("clan", {}).get("participants", [])}
@@ -212,29 +237,32 @@ class Admin(commands.Cog):
                 "last_seen": last_seen,
                 "last_seen_ts": last_seen_ts,
                 "days_since_seen": days_since_seen,
-                # Fields for future use
                 "fame": None, 
                 "trophies": m.get('trophies'),
                 "exp_level": m.get('expLevel')
             })
 
         # --- CSV Generation (In-Memory) ---
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["Tag", "Name", "Role", "Donations", "War Decks", "Expected Decks", "Completion%", "Last Seen"])
-        for m in members_summary:
-            writer.writerow([
-                f"#{m.get('tag','')}",
-                m.get("name", ""),
-                m.get("role", ""),
-                m.get("donations", 0),
-                m.get("war_decks", 0),
-                m.get("expected_decks", 0),
-                f"{m.get('deck_completion_pct') or 0:.2f}",
-                m.get("last_seen") or ""
-            ])
-        output.seek(0)
-        csv_bytes = output.getvalue().encode("utf-8")
+        try:
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["Tag", "Name", "Role", "Donations", "War Decks", "Expected Decks", "Completion%", "Last Seen"])
+            for m in members_summary:
+                writer.writerow([
+                    f"#{m.get('tag','')}",
+                    m.get("name", ""),
+                    m.get("role", ""),
+                    m.get("donations", 0),
+                    m.get("war_decks", 0),
+                    m.get("expected_decks", 0),
+                    f"{m.get('deck_completion_pct') or 0:.2f}",
+                    m.get("last_seen") or ""
+                ])
+            output.seek(0)
+            csv_bytes = output.getvalue().encode("utf-8")
+        except Exception:
+            self.log.exception("Error generating CSV for audit")
+            csv_bytes = None
 
         # --- DB Storage ---
         snapshot = {
@@ -245,7 +273,7 @@ class Admin(commands.Cog):
             "fame": war.get("clan", {}).get("fame"),
             "member_count": clan.get("members", 0),
             "members": members_summary,
-            "issues": [f"**{m.get('name')}**: {m.get('war_decks', 0)}/{m.get('expected_decks', 0)}" 
+            "issues": [f"**{m.get('name')}** ({m.get('role', 'member')}): `{m.get('war_decks', 0)}/{m.get('expected_decks', 0)}`" 
                        for m in members_summary 
                        if (m.get('war_decks', 0) < (m.get('expected_decks', 0) or 0))]
         }
@@ -254,15 +282,16 @@ class Admin(commands.Cog):
         try:
             # Store CSV in GridFS
             csv_gridfs_id = None
-            def blocking_put_csv(data, filename):
-                return self.fs.put(data, filename=filename)
-            
-            filename = f"audit_{clan_tag}_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv"
-            try:
-                csv_gridfs_id = await loop.run_in_executor(None, blocking_put_csv, csv_bytes, filename)
-                snapshot["csv_gridfs_id"] = csv_gridfs_id
-            except Exception:
-                self.log.exception("GridFS store failed")
+            if csv_bytes:
+                def blocking_put_csv(data, filename):
+                    return self.fs.put(data, filename=filename)
+                
+                filename = f"audit_{clan_tag}_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv"
+                try:
+                    csv_gridfs_id = await loop.run_in_executor(None, blocking_put_csv, csv_bytes, filename)
+                    snapshot["csv_gridfs_id"] = csv_gridfs_id
+                except Exception:
+                    self.log.exception("GridFS store failed")
 
             # Store Snapshot
             def blocking_insert_snapshot(doc):
@@ -299,7 +328,7 @@ class Admin(commands.Cog):
                     return self.player_history.insert_many(docs)
                 await loop.run_in_executor(None, blocking_insert_players, player_docs)
 
-            self.log.info("Saved audit snapshot %s for clan %s", snapshot_id, clan_tag)
+            self.log.info(f"✅ Saved audit snapshot {snapshot_id} for clan {clan_tag}")
         except Exception:
             self.log.exception("Failed to persist audit history")
 
@@ -310,52 +339,53 @@ class Admin(commands.Cog):
     # --------------------
     @tasks.loop(hours=24)
     async def daily_audit_task(self):
-        """Automatically runs the audit logic every 24 hours."""
-        self.log.info("⏰ Starting daily audit task...")
+        """Runs audit once/day. Checks DB to prevent duplicates on restart."""
+        self.log.info("⏰ Daily audit task woke up. Checking schedule...")
         try:
-            # 1. Find all unique clan tags linked in the DB
             all_users = await self._find_all_users()
-            
-            # This is a basic way to find which clans to audit. 
-            # It assumes if a user is linked, we might want to audit their clan.
-            # To be safe/efficient, you might want to limit this to specific clans 
-            # or just the bot owner's clan in the future.
-            
-            # For now, let's just grab the tags we can resolve.
             scanned_clans = set()
             
-            for user in all_users:
-                # We need to resolve the clan tag for this user if we don't have it stored
-                # This part can be API heavy if you have many users. 
-                # Optimization: Store clan_tag in the user DB when they !link.
-                
-                # Slower fallback: Just audit the clan of the first Admin found (Bot Owner)
-                pass 
+            if not all_users:
+                self.log.info("No users found to audit.")
+                return
 
-            # Since resolving all users is expensive, for this version 
-            # let's try to grab the clan tag of the first few users until we find one.
-            # OR better: if you have a primary clan, you can hardcode it here or load from config.
+            # Pick the first user to seed the clan tag
+            first_user = all_users[0] 
+            clean_tag = first_user.get("player_id", "").replace("#", "")
             
-            # Strategy: Audit clans that have at least one user with 'manage_guild' permissions 
-            # (requires guild context) or just audit the clan of the person who last ran !audit.
-            #
-            # SIMPLIFICATION for "Graveyard Bot": I will look for the clan tag of the first user found.
-            # In a real production bot, you'd iterate a specific list of monitored clans.
+            if not clean_tag:
+                return
+
+            p_url = f"{self.api_base}/players/%23{clean_tag}"
+            p_data = await self.bot.fetch_api(p_url, ttl=3600)
             
-            if all_users:
-                # Pick the first user to seed the clan tag
-                first_user = all_users[0] 
-                clean_tag = first_user.get("player_id", "").replace("#", "")
-                if clean_tag:
-                    p_url = f"{self.api_base}/players/%23{clean_tag}"
-                    p_data = await self.bot.fetch_api(p_url, ttl=3600)
-                    if p_data and "clan" in p_data:
-                        clan_tag = p_data["clan"]["tag"].replace("#", "")
-                        if clan_tag not in scanned_clans:
-                            await self._run_audit_scan(clan_tag)
-                            scanned_clans.add(clan_tag)
-            
-            self.log.info("✅ Daily audit complete.")
+            if p_data and "clan" in p_data:
+                clan_tag = p_data["clan"]["tag"].replace("#", "")
+                
+                if clan_tag not in scanned_clans:
+                    # --- DUPLICATE CHECK START ---
+                    now = datetime.utcnow()
+                    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+                    loop = asyncio.get_running_loop()
+                    def blocking_check():
+                        return self.history.find_one({
+                            "clan_tag": clan_tag,
+                            "timestamp": {"$gte": today_start}
+                        })
+                    
+                    exists = await loop.run_in_executor(None, blocking_check)
+                    
+                    if exists:
+                        self.log.info(f"☕ Audit already completed for {clan_tag} today. Skipping.")
+                    else:
+                        self.log.info(f"🚀 No audit found for today. Running scan for {clan_tag}...")
+                        await self._run_audit_scan(clan_tag)
+                    
+                    scanned_clans.add(clan_tag)
+            else:
+                 self.log.warning(f"Could not resolve clan for seeded user {first_user.get('_id')}")
+
         except Exception:
             self.log.exception("❌ Error in daily audit task")
 
@@ -363,13 +393,89 @@ class Admin(commands.Cog):
     async def before_daily_audit(self):
         await self.bot.wait_until_ready()
 
-
     # --------------------
     # Commands
     # --------------------
     @commands.hybrid_command(name="audit")
     async def audit(self, ctx):
-        """Displays low activity members (missed war decks)."""
+        """Displays low activity members (Cached for 10 mins)."""
+        if not await self.is_leader(ctx.author.id):
+            return await ctx.reply("❌ Access Denied (Leaders only).", mention_author=False)
+
+        clan_tag = await self.get_clan_tag(ctx)
+        if not clan_tag:
+            return await ctx.reply("❌ Link your account first.", mention_author=False)
+
+        # --- CACHE CHECK ---
+        cache_key = f"audit_report:{clan_tag}" 
+        timestamp_key = f"audit_ts:{clan_tag}"
+        
+        cached_msg = None
+        data_age_str = "Fresh"
+        
+        if self.redis:
+            try:
+                cached_bytes = self.redis.get(cache_key)
+                if cached_bytes:
+                    cached_msg = cached_bytes.decode('utf-8')
+                    # Calculate Age
+                    ts_bytes = self.redis.get(timestamp_key)
+                    if ts_bytes:
+                        saved_ts = float(ts_bytes.decode('utf-8'))
+                        mins_ago = int((datetime.utcnow().timestamp() - saved_ts) / 60)
+                        data_age_str = f"{mins_ago}m ago"
+            except Exception:
+                self.log.exception("Redis read error in audit")
+
+        if cached_msg:
+             # If it was chunked/split in a previous run, it might be tricky to store multiple msgs in one key.
+             # For simplicity, we cache the FULL text and re-chunk it here.
+             chunks = self._chunk_message(f"📉 **Low Activity Report** (⚡ Cached: {data_age_str})", cached_msg.split("\n"))
+             for chunk in chunks:
+                 await ctx.send(chunk)
+             return
+
+        await self._safe_defer(ctx)
+        
+        snapshot = await self._run_audit_scan(clan_tag)
+        if not snapshot:
+            return await ctx.reply("❌ Failed to generate audit data. Check logs.", mention_author=False)
+
+        issues = []
+        for m in snapshot.get("members", []):
+            expected = m.get("expected_decks", 0)
+            used = m.get("war_decks", 0)
+            if expected > 0 and used < expected:
+                diff = expected - used
+                # More detailed format: Role, Name, Used/Expected
+                issues.append(f"⚠️ **{m.get('name')}** ({m.get('role', 'member')}): `{used}/{expected}` (Missed {diff})")
+
+        if issues:
+            # Join all issues into one big string first
+            full_body = "\n".join(issues)
+            
+            # Save to Cache (Raw text body only)
+            if self.redis:
+                try:
+                    self.redis.setex(cache_key, 600, full_body)
+                    self.redis.setex(timestamp_key, 600, str(datetime.utcnow().timestamp()))
+                except Exception:
+                    pass
+
+            # Send safely (Chunked)
+            header = f"📉 **Low Activity Report** ({len(issues)} members flagged)"
+            chunks = self._chunk_message(header, issues)
+            for chunk in chunks:
+                await ctx.send(chunk)
+        else:
+            final_msg = "✅ **Clean Audit:** Everyone is on track with war decks!"
+            if self.redis:
+                 self.redis.setex(cache_key, 600, "Clean Audit")
+            await ctx.reply(final_msg, mention_author=False)
+
+    @commands.hybrid_command(name="forceaudit")
+    async def forceaudit(self, ctx):
+        """Forces a new audit for today, overwriting any existing report."""
         if not await self.is_leader(ctx.author.id):
             return await ctx.reply("❌ Access Denied (Leaders only).", mention_author=False)
 
@@ -378,37 +484,122 @@ class Admin(commands.Cog):
             return await ctx.reply("❌ Link your account first.", mention_author=False)
 
         await self._safe_defer(ctx)
-        
-        # 1. Run the audit (Generates fresh data + Logs to DB)
+        await ctx.send("🔄 **Overwriting Audit:** Clearing old data...", delete_after=5)
+
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        loop = asyncio.get_running_loop()
+        def blocking_cleanup():
+            old_doc = self.history.find_one({
+                "clan_tag": clan_tag,
+                "timestamp": {"$gte": today_start}
+            })
+            if old_doc:
+                old_id = old_doc["_id"]
+                self.history.delete_one({"_id": old_id})
+                self.player_history.delete_many({"snapshot_id": old_id})
+                return True
+            return False
+
+        was_deleted = await loop.run_in_executor(None, blocking_cleanup)
         snapshot = await self._run_audit_scan(clan_tag)
-        
-        if not snapshot:
-            return await ctx.reply("❌ Failed to generate audit data.", mention_author=False)
 
-        # 2. Filter for Low Activity
-        # Definition: Users who have used FEWER decks than expected (and aren't new/0 expected)
-        issues = []
-        for m in snapshot.get("members", []):
-            expected = m.get("expected_decks", 0)
-            used = m.get("war_decks", 0)
-            
-            if expected > 0 and used < expected:
-                diff = expected - used
-                issues.append(f"⚠️ **{m.get('name')}**: `{used}/{expected}` (Missed {diff})")
+        # Clear cache so normal !audit picks up new data
+        if self.redis:
+            self.redis.delete(f"audit_report:{clan_tag}")
+            self.redis.delete(f"audit_ts:{clan_tag}")
 
-        # 3. Send Report
-        if issues:
-            # Discord has a 2000 char limit, so we might need to chunk if the list is huge
-            # For now, taking top 20 worst offenders or joining simply
-            msg_header = f"📉 **Low Activity Report** ({len(issues)} members)\n"
-            msg_body = "\n".join(issues[:30]) # Limit to 30 lines to prevent errors
+        if snapshot:
+            msg = "✅ **Success:** Today's audit has been overwritten with fresh data."
+            if was_deleted:
+                msg += "\n🗑️ *(Previous report was found and deleted)*"
             
-            if len(issues) > 30:
-                msg_body += f"\n...and {len(issues)-30} more."
-            
-            await ctx.reply(msg_header + msg_body, mention_author=False)
+            issues_count = len(snapshot.get("issues", []))
+            msg += f"\n📊 **New Stats:** {snapshot.get('member_count')} members scanned, {issues_count} flagged."
+            await ctx.reply(msg, mention_author=False)
         else:
-            await ctx.reply("✅ **Clean Audit:** Everyone is on track with war decks!", mention_author=False)
+            await ctx.reply("❌ Failed to generate new audit.", mention_author=False)
+
+    @commands.hybrid_command(name="scout")
+    async def scout(self, ctx, *, arg: str = None):
+        """Generates a meta report of opponent cards (Cached for 10 mins)."""
+        clan_flag = bool(arg and arg.lower().strip() == "clan")
+        clan_tag = await self.get_clan_tag(ctx)
+        if not clan_tag:
+            return await ctx.reply("❌ Link your account and join a clan first.", mention_author=False)
+
+        # --- CACHE CHECK ---
+        if clan_flag:
+            cache_key = f"scout_meta:clan:{clan_tag}"
+        else:
+            cache_key = f"scout_meta:player:{ctx.author.id}"
+
+        if self.redis:
+            cached_msg = self.redis.get(cache_key)
+            if cached_msg:
+                return await ctx.reply(cached_msg.decode('utf-8') + "\n*(⚡ Cached result)*", mention_author=False)
+
+        await self._safe_defer(ctx)
+        url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
+        data = await self.bot.fetch_api(url, ttl=30)
+        if not data:
+            self.log.warning(f"Scout failed: Could not fetch river race for {clan_tag}")
+            return await ctx.reply("❌ Failed to fetch race data.", mention_author=False)
+
+        participants = data.get("clan", {}).get("participants", [])
+        if not participants:
+            return await ctx.reply("❌ No participants data available.", mention_author=False)
+
+        if not clan_flag:
+            linked = await self._find_user_by_discord(ctx.author.id)
+            if linked and linked.get("player_id"):
+                player_tag = "#" + linked.get("player_id").lstrip("#")
+                target = next((p for p in participants if p.get("tag") == player_tag), None)
+                if target:
+                    top_players = [target]
+                else:
+                    top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:1]
+            else:
+                return await ctx.reply("❌ I couldn't resolve your linked player tag. Use `!link <tag>`", mention_author=False)
+        else:
+            # Top 5 players by usage
+            top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:5]
+
+        opponent_cards = []
+        battles_analyzed = 0
+        
+        for p in top_players:
+            tag = p.get('tag', '').lstrip("#")
+            b_url = f"{self.api_base}/players/%23{tag}/battlelog"
+            logs = await self.bot.fetch_api(b_url, ttl=30)
+            
+            if logs:
+                for battle in logs[:10]: # Check last 10 battles
+                    # Verify it's a river race battle if needed, but for now we take all recent
+                    opp = battle.get("opponent", [{}])[0]
+                    cards = opp.get("cards", [])
+                    if cards:
+                        battles_analyzed += 1
+                        for card in cards:
+                            opponent_cards.append(card.get('name'))
+            else:
+                self.log.warning(f"Scout: Failed to fetch battle log for {tag}")
+                
+            await asyncio.sleep(0.25)
+
+        most_common = Counter(opponent_cards).most_common(8) # Increased to top 8
+        if most_common:
+            header = f"⚠️ **Meta Report** (Based on {battles_analyzed} battles)\n"
+            body = "\n".join([f"🔥 **{c}** ({n})" for c, n in most_common])
+            msg = header + body
+            
+            if self.redis:
+                self.redis.setex(cache_key, 600, msg)
+            
+            await ctx.reply(msg, mention_author=False)
+        else:
+            await ctx.reply("❌ Could not analyze battles (No data found).", mention_author=False)
 
     @commands.hybrid_command(name="whohas")
     async def whohas(self, ctx, *, card_name: str):
@@ -424,8 +615,7 @@ class Admin(commands.Cog):
         c_url = f"{self.api_base}/clans/%23{clan_tag}"
         clan_data = await self.bot.fetch_api(c_url, ttl=30)
         if not clan_data:
-            await ctx.reply("❌ Failed to fetch clan.", mention_author=False)
-            return
+            return await ctx.reply("❌ Failed to fetch clan.", mention_author=False)
 
         members = clan_data.get("memberList", [])[:15]
         hits = []
@@ -442,6 +632,8 @@ class Admin(commands.Cog):
                         normalized_level = card_level + (MAX_CARD_LEVEL - card_max)
                         hits.append(f"**{member.get('name')}**: Lvl {normalized_level} (raw {card_level}/{card_max})")
                         break
+            else:
+                self.log.warning(f"WhoHas: Failed to fetch player {tag}")
             await asyncio.sleep(0.25)
 
         if hits:
@@ -481,57 +673,6 @@ class Admin(commands.Cog):
             await ctx.reply(f"🔮 **Forecast:**\n🏁 Fame: `{fame}/{GOAL}`\n🚀 Left: `{remaining}`\n🃏 Est. Decks: `{needed}`", mention_author=False)
         else:
             await ctx.reply("📉 Not enough data.", mention_author=False)
-
-    @commands.hybrid_command(name="scout")
-    async def scout(self, ctx, *, arg: str = None):
-        """Generates a meta report of opponent cards from the current river race."""
-        clan_flag = bool(arg and arg.lower().strip() == "clan")
-        clan_tag = await self.get_clan_tag(ctx)
-        if not clan_tag:
-            return await ctx.reply("❌ Link your account and join a clan first.", mention_author=False)
-
-        await self._safe_defer(ctx)
-        url = f"{self.api_base}/clans/%23{clan_tag}/currentriverrace"
-        data = await self.bot.fetch_api(url, ttl=30)
-        if not data:
-            return await ctx.reply("❌ Failed to fetch race data.", mention_author=False)
-
-        participants = data.get("clan", {}).get("participants", [])
-        if not participants:
-            return await ctx.reply("❌ No participants data available.", mention_author=False)
-
-        if not clan_flag:
-            linked = await self._find_user_by_discord(ctx.author.id)
-            if linked and linked.get("player_id"):
-                player_tag = "#" + linked.get("player_id").lstrip("#")
-                target = next((p for p in participants if p.get("tag") == player_tag), None)
-                if target:
-                    top_players = [target]
-                else:
-                    top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:1]
-            else:
-                return await ctx.reply("❌ I couldn't resolve your linked player tag. Use `!link <tag>`", mention_author=False)
-        else:
-            top_players = sorted(participants, key=lambda x: x.get('decksUsed', 0), reverse=True)[:5]
-
-        opponent_cards = []
-        for p in top_players:
-            tag = p.get('tag', '').lstrip("#")
-            b_url = f"{self.api_base}/players/%23{tag}/battlelog"
-            logs = await self.bot.fetch_api(b_url, ttl=30)
-            if logs:
-                for battle in logs[:10]:
-                    opp = battle.get("opponent", [{}])[0]
-                    for card in opp.get("cards", []):
-                        opponent_cards.append(card.get('name'))
-            await asyncio.sleep(0.25)
-
-        most_common = Counter(opponent_cards).most_common(5)
-        if most_common:
-            msg = "⚠️ **Meta Report:**\n" + "\n".join([f"🔥 **{c}** ({n})" for c, n in most_common])
-            await ctx.reply(msg, mention_author=False)
-        else:
-            await ctx.reply("❌ Could not analyze battles.", mention_author=False)
 
     @commands.hybrid_command(name="rolesync")
     @commands.has_permissions(manage_roles=True)
@@ -603,10 +744,14 @@ class Admin(commands.Cog):
             if "lastSeen" in member:
                 try:
                     ls = member['lastSeen']
-                    hour_str = ls.split('T')[1][:2]
-                    hours.append(int(hour_str))
+                    # Use safer string searching than fixed index
+                    if 'T' in ls:
+                        hour_str = ls.split('T')[1][:2]
+                        if hour_str.isdigit():
+                            hours.append(int(hour_str))
                 except Exception:
-                    pass
+                     # Log this because parsing errors matter
+                     self.log.warning(f"Failed to parse time for {member.get('name')}")
 
         if not hours:
             return await ctx.reply("❌ No activity data available.", mention_author=False)
