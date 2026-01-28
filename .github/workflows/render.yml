@@ -8,4 +8,4 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Trigger Render Deploy
-        run: curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}\n
+        run: curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
