@@ -398,5 +398,10 @@ async def on_ready():
 if __name__ == "__main__":
     try:
         bot.run(DISCORD_TOKEN)
-    except Exception:
+    except Exception as e:
+        # These lines will print the actual error to your logs
+        log.error(f"❌ CRITICAL ERROR: {e}")
+        traceback.print_exc() 
+        
+        # Keep the container alive so you can read the logs
         while True: time.sleep(3600)
